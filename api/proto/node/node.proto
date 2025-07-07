@@ -1,0 +1,154 @@
+// This file contains all the message definitions and service declarations for the Node protocol.
+
+syntax = "proto3";
+
+package proto.node;
+option go_package = "github.com/flavio-simonelli/Gupta-Implementation/api/proto/node;protonode";
+
+import "google/protobuf/empty.proto"; // minimal ack
+
+message NodeId {
+  string node_id = 1; // Unique identifier for the node in hexadecimal format
+}
+
+message NodeAddress {
+  string address = 1; // address of the node in the format "ip:port"
+}
+
+message Node {
+  NodeId node_id = 1; // Unique identifier for the node
+  NodeAddress address = 2; // address of the node in the format "ip:port"
+}
+
+message Entry {
+  string node_id = 1; // Unique identifier for the node in hexadecimal format
+  string address = 2; // address of the node in the format "ip:port"
+  bool is_supernode = 3; // Indicates if the node is a supernode
+  bool is_slice_leader = 4; // Indicates if the node is a slice leader
+  bool is_unit_leader = 5; // Indicates if the node is a unit leader
+}
+
+// ----- Info di redirect da inserire in google.rpc.Status.details -----
+message RedirectInfo {
+  Node target = 1;      // Node to which the request should be redirected
+}
+
+// ----- message dissemination -----
+enum EventType {
+  JOIN  = 0;
+  LEAVE_NORMAL  = 1;
+  LEAVE_UNITLEADER  = 2;
+  LEAVE_SLICELEADER  = 3;
+}
+
+message NotifyMessage {
+  Node node = 1; // Node interested in the message
+  EventType event_type = 2; // Type of event (JOIN, LEAVE_NORMAL, LEAVE_UNITLEADER, LEAVE_SLICELEADER)
+}
+
+// ----- Resource -----
+message ResourceMetadata {
+  string key   = 1;         // id resource
+  string name  = 2;         // name (deriving key)
+  uint64 size  = 3;         // total size in bytes
+}
+
+message StoreChunk {
+  string resource_key = 1;  // id resource
+  uint64 offset       = 2;  // byte offset (for resume/verify)
+  bytes  data         = 3;  // payload
+  bool   eof          = 4;  // true in the last chunk of the resource
+}
+
+message Resource {
+  oneof payload {
+    ResourceMetadata resource_metadata = 1; // Metadata of the resource
+    StoreChunk store_chunk = 2; // Chunk of the resource
+  }
+}
+
+// ----- Routing Table -----
+message RoutingTableChunk {
+  repeated Entry entries = 1; // List of routing entries
+}
+
+// ----- Join Request -----
+message FindSuccessorRequest {
+  NodeId id = 1; // Unique identifier for the node whose successor is being requested
+}
+message FindSuccessorResponse {
+  NodeAddress address = 1; // address of the node in the format "ip:port"
+}
+message BecomePredecessorRequest {
+  Node node = 1; // Node that is becoming the predecessor
+}
+message BecomePredecessorResponse {
+  oneof payload {
+    RoutingTableChunk routing_chunk = 1; // Routing table chunk
+    ResourceMetadata resource_metadata = 2; // Metadata of the resource
+    StoreChunk store_chunk = 3; // Chunk of the resource
+    }
+}
+message NotifyPredecessorRequest {
+  Node new_successor = 1; // New successor node
+}
+
+// ----- Leave Request -----
+message NotifySuccessorLeaveRequest {
+  Node node = 1; // Node that is leaving the network
+}
+message NotifyPredecessorLeaveRequest {
+  Node node = 1; // Node that is leaving the network
+}
+
+// ----- Lookup Request -----
+message LookupRequest {
+  string key = 1; // Key to look up in the network
+}
+
+
+
+// ------ Services ------
+
+service JoinService {
+  // Ritorna SEMPRE OK + successore.
+  rpc FindSuccessor(FindSuccessorRequest)
+      returns (FindSuccessorResponse);
+
+  // if the node isn't the successor of the target node:
+  //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realSuccessor}
+  rpc BecomePredecessor(BecomePredecessorRequest)
+      returns (stream BecomePredecessorResponse);
+
+  // if the node isn't the predecessor of the target node:
+  //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realPredecessor}
+  rpc NotifyPredecessor(NotifyPredecessorRequest)
+      returns (google.protobuf.Empty);
+
+}
+
+service LeaveService {
+  rpc NotifySuccessorLeave(NotifySuccessorLeaveRequest)
+      returns (google.protobuf.Empty);
+
+  rpc SendResourceSuccessor(stream Resource)
+      returns (google.protobuf.Empty);
+
+  rpc NotifyPredecessorLeave(NotifyPredecessorLeaveRequest)
+      returns (google.protobuf.Empty);
+}
+
+service StorageService {
+  //   NON responsabile → FAILED_PRECONDITION + RedirectInfo{target=responsabile}
+  rpc Store(stream Resource) returns (google.protobuf.Empty);
+
+  // === FETCH ===
+  //   NON responsabile → FAILED_PRECONDITION
+  rpc Fetch(LookupRequest) returns (stream Resource);
+}
+
+service DisseminationService {
+  rpc Notify(NotifyMessage)
+      returns (google.protobuf.Empty);
+}
+

@@ -1,0 +1,17 @@
+{
+  "node": {
+    "id" : "",
+    "ip": "127.0.0.1",
+    "port": 0,
+    "main_storage": "$HOME/.dht_storage",
+    "predecessor_storage": "$HOME/.dht_predecessor",
+    "successor_storage": "$HOME/.dht_successor",
+    "max_connections_client": 10,
+    "supernode": true
+  },
+  "dht": {
+    "K": 16,
+    "U": 20,
+    "bootstrap_node": ""
+  }
+}
