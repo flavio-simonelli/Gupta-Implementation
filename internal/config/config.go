@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // error set
@@ -12,7 +14,7 @@ var (
 	ErrReadConfigFailed  = errors.New("failed to read configuration file")
 	ErrParseConfigFailed = errors.New("failed to parse configuration file")
 	ErrInvalidKValue     = errors.New("invalid K value: must be greater than 0")
-	ErrInvalidUValue     = errors.New("invalid U value: must be greater than 0")
+	ErrInvalidUValue     = errors.New("invalid U value: must be >= 0")
 	ErrInvalidPortValue  = errors.New("invalid port value: must be greater than 0")
 )
 
@@ -70,7 +72,7 @@ func LoadConfig(filePath string) (Config, error) {
 	if cfg.DHT.U <= 0 {
 		return Config{}, ErrInvalidUValue
 	}
-	if cfg.Node.Port <= 0 {
+	if cfg.Node.Port < 0 {
 		return Config{}, ErrInvalidPortValue
 	}
 
@@ -83,7 +85,16 @@ func LoadConfig(filePath string) (Config, error) {
 }
 
 // SaveNodeInfo save the node information to the configuration file for restart use
-func SaveNodeInfo(filePath, id, ip string, port int) error {
+func SaveNodeInfo(filePath, id, addr string) error {
+	// split the address into IP and port
+	ip, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err
+	}
 	// write the actual configuration of the node for the next restart
 	cfg, err := LoadConfig(filePath)
 	if err != nil {

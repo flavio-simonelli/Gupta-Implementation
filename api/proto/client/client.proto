@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package proto.client;
+option go_package = "github.com/flavio-simonelli/Gupta-Implementation/api/proto/client;protoclient";
+
+import "google/protobuf/empty.proto"; // minimal message
+
+message RequestResource {
+  string filename = 1; // Unique identifier for the resource
+}
+
+message Entry {
+  string node_id = 1; // Unique identifier for the node in hexadecimal format
+  string address = 2; // Address of the node in the format "ip:port"
+  bool is_supernode = 3; // Indicates if the node is a supernode
+  bool is_slice_leader = 4; // Indicates if the node is a slice leader
+  bool is_unit_leader = 5; // Indicates if the node is a unit leader
+}
+
+message RoutingTableResponse {
+  repeated Entry entries = 1; // List of entries in the routing table
+}
+
+message ResourceResponse {
+  string filename = 1;  // filename
+  uint64 offset       = 2;  // byte offset (for resume/verify)
+  bytes  data         = 3;  // payload
+  bool   eof          = 4;  // true in the last chunk of the resource
+}
+
+service ClientService {
+  rpc GetRoutingTable(google.protobuf.Empty) returns (RoutingTableResponse);
+  rpc GetResource(RequestResource) returns (stream ResourceResponse);
+  rpc StoreResource(stream ResourceResponse) returns (google.protobuf.Empty);
+}

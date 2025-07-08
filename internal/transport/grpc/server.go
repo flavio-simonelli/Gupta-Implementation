@@ -3,15 +3,24 @@ package grpc
 import (
 	pb "GuptaDHT/api/gen/node"
 	"GuptaDHT/internal/dht"
+	"GuptaDHT/internal/logger"
 	"context"
 	"errors"
 	"fmt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	_ "google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/anypb"
+	_ "google.golang.org/grpc/status"
+	_ "google.golang.org/protobuf/types/known/anypb"
+	"io"
 	"net"
 	"strconv"
+)
+
+const (
+	ChunkSize     = 10        // Size of each chunk for routing table entries
+	FileChunkSize = 64 * 1024 // 64KiB per chunk di file
 )
 
 var (
@@ -100,140 +109,162 @@ func RunServer(node *dht.Node, lis net.Listener) error {
 	return nil
 }
 
-// FindSuccessor handles the gRPC call to find a successor
+// FindSuccessor handles the gRPC call to find a successor (manca la gestione del timeout nel context)
 func (s *Server) FindSuccessor(ctx context.Context, req *pb.FindSuccessorRequest) (*pb.FindSuccessorResponse, error) {
+	// get the node ID from the request
+	logger.Log.Infof("Received FindSuccessorRequest %s", req.Id.NodeId)
 	id, err := dht.IDFromHexString(req.Id.NodeId)
 	if err != nil {
+		logger.Log.Warnf("Invalid node ID: %v", err)
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
 	}
-	fmt.Println("Requesting successor for node ID:", id.ToHexString())
-	successor, err := s.node.T.FindSuccessor(id)
+	// Find the successor for the given ID
+	succ, _, err := s.node.T.FindSuccessor(id)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "error finding successor: %v", err)
 	}
-	fmt.Println("Successor:", successor)
+	logger.Log.Infof("Found successor for ID %s: %s", id.ToHexString(), succ.Address)
 	return &pb.FindSuccessorResponse{
 		Address: &pb.NodeAddress{
-			Address: successor.Address,
+			Address: succ.Address,
 		},
 	}, nil
 }
 
 // BecomePredecessor handles the gRPC call to become a predecessor
 func (s *Server) BecomePredecessor(req *pb.BecomePredecessorRequest, stream pb.JoinService_BecomePredecessorServer) error {
-	// Parse the node ID from the request
+	logger.Log.Infof("Received BecomePredecessorRequest for node ID: %s", req.Node.NodeId.NodeId)
+	// parse the node ID from the request
 	newId, err := dht.IDFromHexString(req.Node.NodeId.NodeId)
 	if err != nil {
+		logger.Log.Warnf("Invalid node ID: %v", err)
 		return status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
 	}
-
-	// Check if we have a predecessor
-	if s.node.Pred == nil {
-		// First node joining, accept it as predecessor
-		fmt.Println("No predecessor, accepting new node as predecessor:", newId.ToHexString())
-		// Create new entry for the node
-		newPred := &dht.RoutingEntry{
-			ID:      newId,
-			Address: req.Node.Address.Address,
+	// change the predecessor
+	oldPred, err := s.node.T.ChangePredecessor(newId, req.Node.Address.Address, req.Node.Supernode, s.node.K, s.node.U)
+	if err != nil {
+		if errors.Is(err, dht.ErrPredRedirect) {
+			// Redirect to the successor if the new ID is not greater than the current predecessor
+			logger.Log.Warnf("Redirecting to successor: %v", oldPred)
+			st := status.New(codes.FailedPrecondition, "not the real successor")
+			stWithInfo, err := st.WithDetails(&pb.RedirectInfo{
+				Target: &pb.NodeAddress{
+					Address: oldPred,
+				},
+			})
+			if err != nil {
+				logger.Log.Errorf("Error creating redirect info: %v", err)
+				return status.Errorf(codes.Internal, "error creating redirect info: %v", err)
+			}
+			return stWithInfo.Err()
+		} else {
+			logger.Log.Errorf("Error changing predecessor: %v", err)
+			return status.Errorf(codes.Internal, "error changing predecessor: %v", err)
 		}
-		s.node.Pred = newPred
-
-		// Send empty routing table since this is the first node
+	}
+	// send the routing table entries in chunks
+	logger.Log.Infof("Sending routing table entries to new predecessor: %s", newId.ToHexString())
+	for i := 0; i < s.node.T.LenTable(); i += ChunkSize {
+		end := i + ChunkSize
+		if end > s.node.T.LenTable() {
+			end = s.node.T.LenTable()
+		}
+		// Get the entries for the current chunk
+		entries, err := s.node.T.ToTransportEntry(i, end)
+		if err != nil {
+			logger.Log.Errorf("Error getting routing entries chunk: %v", err)
+			return status.Errorf(codes.Internal, "error getting routing entries chunk: %v", err)
+		}
+		logger.Log.Infof("Sending chunk %d to new predecessor with %d entries", i/ChunkSize+1, len(entries))
+		pbEntries := make([]*pb.Entry, 0, len(entries))
+		for _, entry := range entries {
+			pbEntry := &pb.Entry{
+				NodeId:        entry.Id.ToHexString(),
+				Address:       entry.Address,
+				IsSupernode:   entry.IsSupernode,
+				IsSliceLeader: entry.IsSliceLeader,
+				IsUnitLeader:  entry.IsUnitLeader,
+			}
+			pbEntries = append(pbEntries, pbEntry)
+		}
 		response := &pb.BecomePredecessorResponse{
 			Payload: &pb.BecomePredecessorResponse_RoutingChunk{
 				RoutingChunk: &pb.RoutingTableChunk{
-					Entries: []*pb.Entry{},
+					Entries: pbEntries,
 				},
 			},
 		}
-		return stream.Send(response)
-	}
-
-	// Check if the node ID is > than the current predecessor ID
-	if s.node.Pred.ID.LessThan(newId) {
-		// OK to become predecessor
-		fmt.Println("Becoming predecessor for node ID:", newId.ToHexString())
-
-		// Get all routing entries to send to the new predecessor
-		entries := s.node.T.GetAllEntries()
-
-		// Create a new routing entry for the node
-		newPred := &dht.RoutingEntry{
-			ID:      newId,
-			Address: req.Node.Address.Address,
+		if err := stream.Send(response); err != nil {
+			logger.Log.Errorf("Failed to send routing entries chunk: %v", err)
+			return status.Errorf(codes.Internal, "failed to send routing entries chunk: %v", err)
 		}
+	}
+	// send the resources that the predecessor should take over
+	resToSend, err := s.node.Store.ListResources(newId, s.node.ID)
+	if err != nil {
+		logger.Log.Errorf("Error listing resources for new predecessor: %v", err)
+		return status.Errorf(codes.Internal, "error listing resources for new predecessor: %v", err)
+	}
+	for _, res := range resToSend {
+		metadata, err := s.node.Store.GetFileInfo(res.Filename)
+		if err != nil {
+			logger.Log.Errorf("Error getting file info for resource %s: %v", res.Filename, err)
+			continue
+		}
+		// create and send the resource metadata
+		meta := &pb.ResourceMetadata{
+			Key:  metadata.ID.ToHexString(),
+			Name: metadata.Filename,
+			Size: metadata.Size,
+		}
+		if err := stream.Send(&pb.BecomePredecessorResponse{
+			Payload: &pb.BecomePredecessorResponse_ResourceMetadata{
+				ResourceMetadata: meta,
+			},
+		}); err != nil {
+			logger.Log.Errorf("Failed to send resource metadata for %s: %v", res.Filename, err)
+			return status.Errorf(codes.Internal, "failed to send resource metadata for %s: %v", res.Filename, err)
+		}
+		// now send the file chunks
+		rc, err := s.node.Store.GetStream(res.Filename)
+		if err != nil {
+			return status.Errorf(codes.Internal, "open resource: %v", err)
+		}
+		defer rc.Close()
 
-		// Update predecessor (save old predecessor reference if needed)
-		// oldPred := s.node.Pred
-		s.node.Pred = newPred
-
-		// Send routing table entries in chunks
-		const chunkSize = 10
-		for i := 0; i < len(entries); i += chunkSize {
-			end := i + chunkSize
-			if end > len(entries) {
-				end = len(entries)
-			}
-
-			// Convert entries to protobuf format
-			pbEntries := make([]*pb.Entry, 0, end-i)
-			for _, entry := range entries[i:end] {
-				pbEntry := &pb.Entry{
-					NodeId:        entry.E.ID.ToHexString(),
-					Address:       entry.E.Address,
-					IsSupernode:   entry.IsSupernode,
-					IsSliceLeader: entry.IsSliceLeader,
-					IsUnitLeader:  entry.IsUnitLeader,
+		buf := make([]byte, FileChunkSize)
+		idx := uint64(0)
+		for {
+			n, rerr := rc.Read(buf)
+			if n > 0 {
+				chunk := &pb.StoreChunk{
+					ResourceKey: res.ID.ToHexString(),
+					Offset:      idx,
+					Data:        buf[:n],
+					Eof:         false, // sovrascrivo dopo
 				}
-				pbEntries = append(pbEntries, pbEntry)
-			}
-
-			// Create and send response with chunk
-			response := &pb.BecomePredecessorResponse{
-				Payload: &pb.BecomePredecessorResponse_RoutingChunk{
-					RoutingChunk: &pb.RoutingTableChunk{
-						Entries: pbEntries,
+				// anticipiamo il last prima di mandare
+				if rerr == io.EOF {
+					chunk.Eof = true
+				}
+				if err := stream.Send(&pb.BecomePredecessorResponse{
+					Payload: &pb.BecomePredecessorResponse_StoreChunk{
+						StoreChunk: chunk,
 					},
-				},
+				}); err != nil {
+					rc.Close()
+					return status.Errorf(codes.Internal, "send chunk: %v", err)
+				}
+				idx++
 			}
-
-			if err := stream.Send(response); err != nil {
-				return status.Errorf(codes.Internal, "failed to send routing entries: %v", err)
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				rc.Close()
+				return status.Errorf(codes.Internal, "read: %v", rerr)
 			}
 		}
-
-		// TODO: Send resources (once implemented)
-		// This would go here, after sending all routing table entries
-		// for each resource:
-		//   1. Send ResourceMetadata
-		//   2. Send StoreChunks in sequence
-
-		return nil
-	} else {
-		// Need to redirect to the successor
-		// This uses standard gRPC error with status details
-		redirect := &pb.RedirectInfo{
-			Target: &pb.Node{
-				NodeId: &pb.NodeId{
-					NodeId: s.node.Succ.ID.ToHexString(),
-				},
-				Address: &pb.NodeAddress{
-					Address: s.node.Succ.Address,
-				},
-			},
-		}
-
-		anyRedirect, err := anypb.New(redirect)
-		if err != nil {
-			return status.Errorf(codes.Internal, "error creating redirect info: %v", err)
-		}
-
-		st := status.New(codes.FailedPrecondition, "cannot become predecessor for node ID "+newId.ToHexString())
-		stDetail, err := st.WithDetails(anyRedirect)
-		if err != nil {
-			return st.Err()
-		}
-
-		return stDetail.Err()
 	}
+	return nil
 }

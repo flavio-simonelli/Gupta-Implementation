@@ -1,6 +1,7 @@
 package dht
 
 import (
+	"GuptaDHT/internal/logger"
 	"errors"
 	"fmt"
 	"sync"
@@ -15,6 +16,7 @@ var (
 	ErrWarpAround              = errors.New("warp around error in binary search, ID is greater than the last entry")
 	ErrBinarySearch            = errors.New("error in binary search, impossible")
 	ErrUnitLeaderAlreadyExists = errors.New("unit leader already exists in the unit leaders table")
+	ErrPredRedirect            = errors.New("predecessor already exists, redirecting to the real predecessor")
 )
 
 // ----- Primitive Structures -----
@@ -78,8 +80,8 @@ func NewTable() *Table {
 // binarySearchLittleMore performs a binary search to find the index of the successor by a given ID in the RoutingTable entries. (NO thread-safe)
 // if return error ErrWarpAround, it means that the ID is greater than the last entry in the routing table, so the successor is the first entry in the routing table.
 func (rt *RoutingTable) binarySearchLittleMore(id ID, start int, end int) (*RoutingEntry, int, error) {
-	if start < 0 || end >= len(rt.entries) || start > end {
-		return nil, -1, ErrInvalidParameters
+	if start > end {
+		return nil, -1, ErrWarpAround // if start is greater than end, we return an error
 	}
 	if end == len(rt.entries) && rt.entries[end].ID.LessThan(id) {
 		return nil, -1, ErrWarpAround // id is greater than the last entry, so we cannot find
@@ -169,6 +171,27 @@ func (rt *RoutingTable) removeEntry(id ID) error {
 }
 
 // ----- Table Operations -----
+
+// FindSuccessor finds the successor of a given ID in the RoutingTable. It returns the entry and its index if found, otherwise returns an error. (Thread-safe)
+func (t *Table) FindSuccessor(id ID) (*RoutingEntry, int, error) {
+	// control parameters
+	if id == (ID{}) {
+		return nil, -1, ErrInvalidParameters // if the ID is empty, we return an error
+	}
+	// lock the read mutex to ensure thread safety
+	t.rt.mu.RLock()
+	defer t.rt.mu.RUnlock() // unlock the table at the end of the reading
+	// find the entry in the routing table
+	logger.Log.Infof("parameter: id: %s, start: %d, end: %d", id.ToHexString(), 0, len(t.rt.entries)-1)
+	entry, idx, err := t.rt.binarySearchLittleMore(id, 0, len(t.rt.entries)-1)
+	if err != nil {
+		if errors.Is(err, ErrWarpAround) {
+			return t.rt.entries[0], 0, nil // if the ID is greater than the last entry, we return the first entry as the successor
+		}
+		return nil, -1, fmt.Errorf("failed to find successor: %w", err) // return the error if something went wrong
+	}
+	return entry, idx, nil // return the entry and its index if found
+}
 
 // FindEntry finds a RoutingEntry in the RoutingTable by its ID. It returns the entry and its index if found, otherwise returns an error. (Thread-safe)
 func (t *Table) FindEntry(id ID) (*RoutingEntry, int, error) {
@@ -441,6 +464,41 @@ func (t *Table) RemoveEntry(id ID) error {
 	return nil // return nil if the removal was successful
 }
 
+// ChangePredecessor changes the predecessor of the node to the given RoutingEntry. It returns an error if the entry is invalid or if the predecessor already exists, return the address of real predecessor. (Thread-safe)
+func (t *Table) ChangePredecessor(id ID, address string, supernode bool, K, U int) (string, error) {
+	// control parameters
+	if address == "" || id == (ID{}) {
+		return "", ErrInvalidParameters // if the ID or address is empty, we return an error
+	}
+	// add the entry to the routing table
+	err := t.AddEntry(id, address, supernode, false, false, K, U)
+	if err != nil && !errors.Is(err, ErrEntryAlreadyExists) {
+		return "", fmt.Errorf("failed to add entry to routing table: %w", err)
+	}
+	// lock the predecessor entry for writing
+	t.Pred.mu.Lock()
+	defer t.Pred.mu.Unlock() // unlock the predecessor entry at the end of the writing
+	// check if the node is really a new predecessor
+	if t.Pred.entry == nil || t.Pred.entry.ID.LessThan(id) {
+		// get the entry from the routing table
+		entry, _, err := t.FindEntry(id)
+		if err != nil {
+			return "", fmt.Errorf("failed to find entry for predecessor: %w", err)
+		}
+		// change the predecessor entry to the new entry
+		old := ""
+		if t.Pred.entry != nil {
+			old = t.Pred.entry.Address // save the old predecessor address
+		} else {
+			old = "" // if the predecessor was nil, we set the old address to empty
+		}
+		t.Pred.entry = entry
+		return old, nil
+	}
+	// if the predecessor already exists and is greater than the new entry, we return the address of the old predecessor
+	return t.Pred.entry.Address, ErrPredRedirect
+}
+
 // ----- Transport Convention -----
 
 // TransportEntry is the rappresentation of a entry for exchange information between nodes in the DHT.
@@ -450,6 +508,11 @@ type TransportEntry struct {
 	IsSupernode   bool
 	IsSliceLeader bool
 	IsUnitLeader  bool
+}
+
+// LenTable returns the number of entries in the routing table
+func (t *Table) LenTable() int {
+	return len(t.rt.entries)
 }
 
 // convertToTransportEntry converts a RoutingEntry to a TransportEntry for network transmission. (Server-side)
@@ -464,23 +527,55 @@ func (re *RoutingEntry) convertToTransportEntry(isSupernode, isSliceLeader, isUn
 }
 
 // ToTransportEntry converts a Table to a slice of TransportEntry for network transmission. (Server-side)
-func (t *Table) ToTransportEntry() []TransportEntry {
+func (t *Table) ToTransportEntry(start, end int) ([]TransportEntry, error) {
+	if start < 0 {
+		start = 0
+	}
+	t.rt.mu.RLock()
+	rtLen := len(t.rt.entries)
+	t.rt.mu.RUnlock()
+	if end <= 0 || end > rtLen {
+		end = rtLen
+	}
+	if start >= end {
+		return nil, fmt.Errorf("invalid range: start (%d) must be less than end (%d)", start, end)
+	}
 	// block in read mode all the routing tables
 	t.rt.mu.RLock()
 	t.ul.mu.RLock()
 	t.sl.mu.RLock()
 	t.sn.mu.RLock()
-	t.Pred.mu.RLock()
 	// defer to unlock the mutexes at the end of the function
-	defer t.Pred.mu.RUnlock()
 	defer t.sn.mu.RUnlock()
 	defer t.sl.mu.RUnlock()
 	defer t.ul.mu.RUnlock()
 	defer t.rt.mu.RUnlock()
 	// for each entry in the routing table, convert it to a TransportEntry and append it to the slice
-	entries := make([]TransportEntry, 0, len(t.rt.entries))
+	part := t.rt.entries[start:end]
+	entries := make([]TransportEntry, 0, len(part)) // preallocate the slice with the expected size
 	var isSupernode, isSliceLeader, isUnitLeader bool
-	j, k, v := 0, 0, 0
+	// find the indices for the supernodes, slice leaders, and unit leaders
+	_, j, err := t.sn.binarySearchLittleMore(part[0].ID, 0, len(t.sn.entries)-1)
+	if err != nil {
+		if errors.Is(err, ErrWarpAround) {
+			j = len(t.sn.entries) // no search needed
+		}
+		return nil, fmt.Errorf("failed to find supernode index: %w", err)
+	}
+	_, k, err := t.sl.binarySearchLittleMore(part[0].ID, 0, len(t.sl.entries)-1)
+	if err != nil {
+		if errors.Is(err, ErrWarpAround) {
+			k = len(t.sl.entries) // no search needed
+		}
+		return nil, fmt.Errorf("failed to find slice leader index: %w", err)
+	}
+	_, v, err := t.ul.binarySearchLittleMore(part[0].ID, 0, len(t.ul.entries)-1)
+	if err != nil {
+		if errors.Is(err, ErrWarpAround) {
+			v = len(t.ul.entries) // no search needed
+		}
+		return nil, fmt.Errorf("failed to find unit leader index: %w", err)
+	}
 	for _, entry := range t.rt.entries {
 		if j < len(t.sn.entries) && entry.ID.Equals(t.sn.entries[j].ID) {
 			isSupernode = true
@@ -503,7 +598,7 @@ func (t *Table) ToTransportEntry() []TransportEntry {
 		// convert the entry to a TransportEntry and append it to the slice
 		entries = append(entries, entry.convertToTransportEntry(isSupernode, isSliceLeader, isUnitLeader))
 	}
-	return entries
+	return entries, nil
 }
 
 // AddTransportEntry adds a TransportEntry to the Table, converting it to a RoutingEntry and adding it to the appropriate routing tables. (Client-side)

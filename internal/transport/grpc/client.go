@@ -3,12 +3,14 @@ package grpc
 import (
 	pb "GuptaDHT/api/gen/node"
 	"GuptaDHT/internal/dht"
+	"GuptaDHT/internal/logger"
 	"context"
 	"errors"
 	"fmt"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -16,9 +18,15 @@ import (
 )
 
 var (
-	ErrInvalidMaxSize  = errors.New("invalid maximum size for connection pool, must be greater than 0")
-	ErrConnectionInUse = errors.New("connection is still in use, cannot remove it")
+	ErrInvalidMaxSize    = errors.New("invalid maximum size for connection pool, must be greater than 0")
+	ErrConnectionInUse   = errors.New("connection is still in use, cannot remove it")
+	ErrPoolClosed        = errors.New("pool is closed, cannot use it")
+	ErrDeadlineExceeded  = errors.New("deadline exceeded, operation timed out")
+	ErrServerUnavailable = errors.New("service unavailable, no connection available")
+	ErrRedirectSuccessor = errors.New("redirect to another successor node, operation not supported yet")
 )
+
+// ----- ConnectionInfo struct and operations on a single gRPC connection -----
 
 // ConnectionInfo holds information about a gRPC connection to other node.
 type ConnectionInfo struct {
@@ -26,6 +34,7 @@ type ConnectionInfo struct {
 	target   string // address:port of receiver
 	useCount atomic.Int32
 	lastUse  atomic.Int64
+	p        *ConnectionPool // pointer to the connection pool that manages this connection
 }
 
 // increment the use count of the connection
@@ -35,8 +44,14 @@ func (ci *ConnectionInfo) acquire() {
 }
 
 // decrement the use count of the connection
-func (ci *ConnectionInfo) release() {
-	ci.useCount.Add(-1)
+func (ci *ConnectionInfo) release() error {
+	if n := ci.useCount.Add(-1); n < 0 {
+		return ErrConnectionInUse
+	} else if n == 0 {
+		// wake up any waiting goroutines if the use count reaches zero
+		ci.p.cond.Broadcast()
+	}
+	return nil
 }
 
 // check if the connection is still in use
@@ -54,11 +69,15 @@ func (ci *ConnectionInfo) remove() error {
 	return nil
 }
 
+// ----- ConnectionPool struct and operations -----
+
 // ConnectionPool manages a pool of gRPC connections to other nodes.
 type ConnectionPool struct {
 	mu          sync.RWMutex
+	cond        *sync.Cond // condition variable for waiting connections
 	connections []*ConnectionInfo
 	maxSize     int
+	close       bool // for a correct shutdown of the node
 }
 
 // NewConnectionPool creates a new ConnectionPool with a specified maximum size.
@@ -66,146 +85,189 @@ func NewConnectionPool(maxSize int) (*ConnectionPool, error) {
 	if maxSize <= 0 {
 		return nil, ErrInvalidMaxSize
 	}
-	return &ConnectionPool{
+	p := &ConnectionPool{
 		connections: make([]*ConnectionInfo, 0, maxSize),
 		maxSize:     maxSize,
-	}, nil
+		close:       false, // initially not closed
+	}
+	p.cond = sync.NewCond(&p.mu) // initialize the condition variable with the pool's mutex
+	return p, nil
 }
 
-// getConnection retrieves an existing connection or creates a new one and delete the old connection if the pool is full.
-func (p *ConnectionPool) getConnection(target string) (*ConnectionInfo, error) {
+// getConnection retrieves an existing connection or creates a new one and delete the old connection if the pool is full. (Thread-safe)
+func (p *ConnectionPool) GetConnection(target string) (*ConnectionInfo, error) {
 	// Acquire lock to ensure thread-safe access to connections
-	p.mu.RLock()
-
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Check if the pool is closed
+	if p.close {
+		return nil, ErrPoolClosed
+	}
 	// look for an existing connection
 	for _, info := range p.connections {
-		if info.target == target && info.conn.GetState() != connectivity.Shutdown {
+		if info.target == target {
 			// increment the use count of the connection
 			info.acquire()
-			p.mu.RUnlock() // release the read lock before returning
 			return info, nil
 		}
 	}
-	p.mu.RUnlock() // release the read lock before creating a new connection
 	// create a new connection
-	conn, err := p.createConnection(target)
+	newInfo, err := p.newConnection(target)
 	if err != nil {
 		return nil, err
 	}
-	return conn, nil
+	// increment the use count of the new connection
+	newInfo.acquire()
+	for {
+		// if the pool is closed, we cannot add a new connection
+		if p.close {
+			_ = newInfo.release()
+			return nil, ErrPoolClosed
+		}
+		// add the new connection to the pool
+		if len(p.connections) < p.maxSize {
+			p.connections = append(p.connections, newInfo)
+			return newInfo, nil
+		}
+		// If the pool is full, we need to remove an old connection
+		idx := -1
+		oldest := time.Now().UnixNano()
+		for i, c := range p.connections {
+			if !c.isInUse() && c.lastUse.Load() < oldest {
+				oldest = c.lastUse.Load()
+				idx = i
+			}
+		}
+		if idx != -1 {
+			if err := p.connections[idx].remove(); err != nil {
+				return nil, err
+			}
+			p.connections[idx] = newInfo
+			return newInfo, nil
+		}
+		// if no connection not in use is found, we wait for one to be released
+		p.cond.Wait()
+	}
 }
 
-// createConnection establishes a new gRPC connection and adds it to the pool
-func (p *ConnectionPool) createConnection(target string) (*ConnectionInfo, error) {
+// createConnection creates a new gRPC connection to the target address and adds it to the pool.
+func (p *ConnectionPool) newConnection(target string) (*ConnectionInfo, error) {
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
-	// Create a new ConnectionInfo instance
+	// create a new connection info instance
 	info := &ConnectionInfo{
 		conn:   conn,
 		target: target,
+		p:      p,
 	}
-	// write lock to ensure exclusive access to the connections slice
-	p.mu.Lock()
-	// If pool is full, remove oldest connection
-	if len(p.connections) >= p.maxSize {
-		// find the oldest connection not in use
-		oldestNotUseIdx := -1
-		newestInUseIdx := -1
-		oldestTime := time.Now().UnixNano()
-		newestTime := int64(0)
-		for i, info := range p.connections {
-			if !info.isInUse() && info.lastUse.Load() < oldestTime {
-				oldestTime = info.lastUse.Load()
-				oldestNotUseIdx = i
-			}
-			if info.lastUse.Load() > newestTime {
-				newestTime = info.lastUse.Load()
-				newestInUseIdx = i
-			}
-		}
-		// If we found an old connection, close it and remove it from the pool and add the new connection
-		if oldestNotUseIdx != -1 {
-			err := p.connections[oldestNotUseIdx].remove()
-			if err != nil {
-				p.mu.Unlock() // release the write lock before returning
-				return nil, err
-			}
-			p.connections[oldestNotUseIdx] = info // replace with the new connection
-		} else {
-			// If no old connection not in use was found, wait the newest connection and remove it
-			for p.connections[newestInUseIdx].isInUse() {
-				// wait for a short time to allow the connection to be released
-				time.Sleep(100 * time.Millisecond)
-			}
-			err := p.connections[newestInUseIdx].remove()
-			if err != nil {
-				p.mu.Unlock() // release the write lock before returning
-				return nil, err
-			}
-		}
-	} else {
-		// If the pool is not full, just add the new connection
-		p.connections = append(p.connections, info)
-	}
-	p.mu.Unlock() // release the write lock after modifying the connections slice
 	return info, nil
 }
 
-// CloseAll closes all connections in the pool.
-func (p *ConnectionPool) CloseAll() {
+// Close closes all connections in the pool and waits for them to be idle before shutting down. (Thread-safe)
+func (p *ConnectionPool) Close(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.close { // if the pool is already closed, return immediately
+		p.mu.Unlock()
+		return nil
+	}
+	p.close = true
+	p.cond.Broadcast() // wake up any waiting goroutines
+	var firstErr error
 
-	for _, info := range p.connections {
-		if info.conn != nil {
-			for info.isInUse() {
-				// wait for the connection to be released
-				time.Sleep(100 * time.Millisecond)
-			}
-			err := info.conn.Close()
-			if err != nil {
-				info.conn.Close() // force close the connection if it is still in use
+	// 1. Attendo che refs==0 per tutte (o ctx.Done)
+	for {
+		allIdle := true
+		for _, c := range p.connections {
+			if c.isInUse() {
+				allIdle = false
+				break
 			}
 		}
+		if allIdle {
+			break
+		}
+
+		// Attendo con cancellazione ctx‑aware
+		waitCh := make(chan struct{})
+		go func() {
+			p.cond.Wait()
+			close(waitCh)
+		}()
+
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // timeout o cancellazione
+		case <-waitCh:
+		}
+		p.mu.Lock()
 	}
-	p.connections = nil // clear the pool
+
+	// 2. Tutte idle → chiudo e svuoto il vettore
+	for _, c := range p.connections {
+		if err := c.remove(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	p.connections = nil
+	p.mu.Unlock()
+	return firstErr
 }
 
-func (p *ConnectionPool) FindSuccessor(ctx context.Context, id dht.ID, addr string) (string, error) {
-	fmt.Printf("Searching for successor of ID %s at address %s\n", id.ToHexString(), addr)
-	// get a connection to the target node
-	info, err := p.getConnection(addr)
+// ----- grpc Handlers for DHT operations -----
+
+// FindSuccessor finds the successor of a given ID in the DHT network by contacting the target node, return an error E
+func (p *ConnectionPool) FindSuccessor(id dht.ID, target string, timeout time.Duration) (string, error) {
+	// create a context with timeout for the gRPC call
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel() // ensure the context is cancelled after use
+	// parse the id in hex string format
+	idHex := id.ToHexString()
+	info, err := p.GetConnection(target)
 	if err != nil {
 		return "", err
 	}
-	defer info.release() // ensure the connection is released after use
+	defer func(info *ConnectionInfo) {
+		_ = info.release()
+	}(info) // ensure the connection is released after use
+	// create a gRPC client for the FindSuccessor method
 	client := pb.NewJoinServiceClient(info.conn)
 	// build the request
 	req := &pb.FindSuccessorRequest{
 		Id: &pb.NodeId{
-			NodeId: id.ToHexString(),
+			NodeId: idHex,
 		},
 	}
 	// call the remote method
 	resp, err := client.FindSuccessor(ctx, req)
 	if err != nil {
-		return "", err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrDeadlineExceeded
+		}
+		if status.Code(err) == codes.Unavailable {
+			return "", ErrServerUnavailable
+		}
+		return "", fmt.Errorf("error finding successor: %w", err)
 	}
-	// print the successor address
-	fmt.Println("Successor address found:", resp.Address.Address)
+	// return the successor address
 	return resp.Address.Address, nil
 }
 
-func (p *ConnectionPool) BecomePredecessor(ctx context.Context, id dht.ID, addr string, reciver string) ([]dht.RoutingEntry, string, error) {
-	fmt.Printf("Becoming predecessor for ID %s at address %s\n", id.ToHexString(), reciver)
+// BecomePredecessor sends a join request to the successor node in addr and returns the routing entries received from the successor and the resource
+func (p *ConnectionPool) BecomePredecessor(id dht.ID, addr string, sn bool, table *dht.Table, store *dht.Storage, K int, U int, target string) (string, error) {
+	// create a context for the gRPC call
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel() // ensure the context is cancelled after use
 	// get a connection to the target node
-	info, err := p.getConnection(reciver)
+	info, err := p.GetConnection(target)
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
-	defer info.release() // ensure the connection is released after use
+	defer func(info *ConnectionInfo) {
+		_ = info.release()
+	}(info) // ensure the connection is released after use
 	client := pb.NewJoinServiceClient(info.conn)
 	// build the request
 	req := &pb.BecomePredecessorRequest{
@@ -216,48 +278,101 @@ func (p *ConnectionPool) BecomePredecessor(ctx context.Context, id dht.ID, addr 
 			Address: &pb.NodeAddress{
 				Address: addr,
 			},
+			Supernode: sn,
 		},
 	}
+	// call the remote method
 	stream, err := client.BecomePredecessor(ctx, req)
 	if err != nil {
-		return nil, "", err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrDeadlineExceeded
+		}
+		if status.Code(err) == codes.Unavailable {
+			return "", ErrServerUnavailable
+		}
+		if status.Code(err) == codes.FailedPrecondition {
+			st, ok := status.FromError(err)
+			if ok {
+				for _, detail := range st.Details() {
+					if redirect, ok := detail.(*pb.RedirectInfo); ok {
+						logger.Log.Errorf("Redirecting to successor %s", redirect.Target.Address)
+						return redirect.Target.Address, ErrRedirectSuccessor
+					}
+				}
+			}
+		}
+		return "", fmt.Errorf("error becoming predecessor: %w", err)
 	}
-	var entries []dht.RoutingEntry
-	var realSucc string
+	// pipe in corso per ogni risorsa in arrivo
+	type xfer struct {
+		pw   *io.PipeWriter
+		done chan error
+	}
+	filePipe := make(map[string]*xfer)
+
 	for {
-		resp, err := stream.Recv()
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break // end of stream
-			}
-			return nil, "", err
+			return "", fmt.Errorf("recv: %w", err)
 		}
 
-		// Check which payload type we received
-		switch payload := resp.GetPayload().(type) {
-		case *pb.BecomePredecessorResponse_RoutingChunk:
-			routingChunk := payload.RoutingChunk
-			for _, entry := range routingChunk.Entries {
-				nodeID, err := dht.IDFromHexString(entry.NodeId)
-				if err != nil {
-					return nil, "", fmt.Errorf("invalid node ID: %w", err)
-				}
+		switch pay := msg.Payload.(type) {
 
-				rEntry := dht.RoutingEntry{
-					ID:      nodeID,
-					Address: entry.Address,
+		//------------------------------------------------------------------
+		case *pb.BecomePredecessorResponse_RoutingChunk:
+			for _, entry := range pay.RoutingChunk.Entries {
+				// Convert the NodeId from hex string to dht.ID
+				id, err := dht.IDFromHexString(entry.NodeId)
+				if err != nil {
+					return "", fmt.Errorf("invalid node ID %s: %w", entry.NodeId, err)
 				}
-				fmt.Println("Adding entry to routing table:", rEntry.ID.ToHexString(), "at address", rEntry.Address)
-				entries = append(entries, rEntry)
+				err = table.AddEntry(id, entry.Address, entry.IsSupernode, entry.IsUnitLeader, entry.IsSliceLeader, K, U)
+				if err != nil {
+					return "", fmt.Errorf("error adding routing entry: %w", err)
+				}
 			}
+
+		//------------------------------------------------------------------
 		case *pb.BecomePredecessorResponse_ResourceMetadata:
-			// Handle resource metadata if needed
-			fmt.Println("Received resource metadata")
+			meta := pay.ResourceMetadata
+
+			pr, pw := io.Pipe()
+			done := make(chan error, 1)
+			go func() { // salva su disco
+				done <- store.PutStream(meta.Name, pr)
+			}()
+			filePipe[meta.Key] = &xfer{pw: pw, done: done}
+
+		//------------------------------------------------------------------
 		case *pb.BecomePredecessorResponse_StoreChunk:
-			// Handle store chunk if needed
-			fmt.Println("Received store chunk")
+			ch := pay.StoreChunk
+			x, ok := filePipe[ch.ResourceKey]
+			if !ok {
+				return "", fmt.Errorf("chunk for unknown %s", ch.ResourceKey)
+			}
+
+			if _, err := x.pw.Write(ch.Data); err != nil {
+				x.pw.CloseWithError(err)
+				return "", err
+			}
+			if ch.Eof {
+				x.pw.Close()
+				if err := <-x.done; err != nil {
+					return "", err
+				}
+				delete(filePipe, ch.ResourceKey)
+			}
+
+		default:
+			return "", fmt.Errorf("unknown payload %T", pay)
 		}
 	}
 
-	return entries, realSucc, nil
+	if len(filePipe) != 0 {
+		return "", fmt.Errorf("stream ended but %d file incomplete", len(filePipe))
+	}
+	return "", nil
 }

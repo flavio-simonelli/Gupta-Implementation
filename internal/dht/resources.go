@@ -15,6 +15,12 @@ var (
 	ErrReadDirectory   = errors.New("failed to read directory")
 )
 
+type MetadataResource struct {
+	ID       ID     // Unique identifier for the resource
+	Filename string // Name of the file in the storage
+	Size     uint64 // Size of the file in bytes
+}
+
 // Resource represents a resource in the DHT network.
 type Resource struct {
 	ID       ID
@@ -117,4 +123,54 @@ func (s *Storage) DeleteResource(filename string) error {
 		return fmt.Errorf("failed to delete file %s: %w", filename, err)
 	}
 	return nil
+}
+
+// ListResources returns a list of all resorces da dare al nuovo predecessore
+func (s *Storage) ListResources(newPred, myID ID) ([]Resource, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrReadDirectory, err)
+	}
+
+	var resources []Resource
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		id := GenerateID(e.Name())
+		if id.IsOwnedBy(newPred, myID) {
+			// skip resources that are not owned by the new predecessor
+			continue
+		} else {
+			// log the resource that is being transferred
+			fmt.Printf("Transferring resource %s with ID %s to new predecessor %s\n", e.Name(), id.ToHexString(), newPred.ToHexString())
+			resources = append(resources, Resource{
+				ID:       id,
+				Filename: e.Name(),
+			})
+		}
+	}
+	return resources, nil
+}
+
+// GetFileInfo returns the file information for a given filename.
+func (s *Storage) GetFileInfo(filename string) (*MetadataResource, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	filePath := filepath.Join(s.dir, filename)
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info for %s: %w", filename, err)
+	}
+
+	id := GenerateID(filename)
+	return &MetadataResource{
+		ID:       id,
+		Filename: filename,
+		Size:     uint64(fileInfo.Size()),
+	}, nil
 }

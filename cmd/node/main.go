@@ -5,7 +5,6 @@ import (
 	"GuptaDHT/internal/dht"
 	"GuptaDHT/internal/logger"
 	transport "GuptaDHT/internal/transport/grpc"
-	"net"
 )
 
 const (
@@ -36,15 +35,21 @@ func main() {
 		return
 	}
 	logger.Log.Infof("Create a client connection pool with max size: %d", loadConfig.Node.MaxConnectionsClient)
+	// initialize the storage for the node
+	store, _, err := dht.NewNodeStorage(loadConfig.Node.MainStorage) //TODO: gestire i file entries
+	if err != nil {
+		logger.Log.WithError(err).Fatal("Error creating node storage")
+		return
+	}
+	logger.Log.Infof("Initialized node storage at: %s", loadConfig.Node.MainStorage)
 	// create a new node with the configuration
-	node, err := dht.NewNode(loadConfig.DHT.U, loadConfig.DHT.K, loadConfig.Node.ID, listener.Addr().String(), client, loadConfig.Node.Supernode)
+	node, err := dht.NewNode(loadConfig.DHT.U, loadConfig.DHT.K, loadConfig.Node.ID, listener.Addr().String(), client, loadConfig.Node.Supernode, store)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error creating DHT node struct")
 		return
 	}
 	// save the new configuration node in the configuration file
-	localAddr := listener.Addr().(*net.UDPAddr)
-	err = config.SaveNodeInfo(DefaultConfigFile, node.ID.ToHexString(), localAddr.IP.String(), localAddr.Port)
+	err = config.SaveNodeInfo(DefaultConfigFile, node.ID.ToHexString(), node.Addr)
 	if err != nil {
 		logger.Log.WithError(err).Errorf("Error saving node info but continuing")
 	}

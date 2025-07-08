@@ -18,6 +18,7 @@ message NodeAddress {
 message Node {
   NodeId node_id = 1; // Unique identifier for the node
   NodeAddress address = 2; // address of the node in the format "ip:port"
+  bool supernode = 3; // Indicates if the node is a supernode
 }
 
 message Entry {
@@ -30,7 +31,7 @@ message Entry {
 
 // ----- Info di redirect da inserire in google.rpc.Status.details -----
 message RedirectInfo {
-  Node target = 1;      // Node to which the request should be redirected
+  NodeAddress target = 1;      // Node to which the request should be redirected
 }
 
 // ----- message dissemination -----
