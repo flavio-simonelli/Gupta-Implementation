@@ -6,26 +6,89 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"time"
 )
 
 var (
-	totalIDs          = new(big.Int).Lsh(big.NewInt(1), 128)
+	totalIDs = new(big.Int).Lsh(big.NewInt(1), 128) // 2^128 total IDs in the DHT ring
+	K        int                                    // Number of slices in the DHT ring, must be > 0
+	U        int                                    // Number of units per slice in the DHT ring, must be > 0
+
+	// Possible Errors
+	// ErrEmptyHexString indicates that the provided hexadecimal string is empty.
 	ErrEmptyHexString = errors.New("hex string cannot be empty")
+	// ErrInvalidHexLength indicates that the provided hexadecimal string does not have the correct length.
+	ErrInvalidHexLength = errors.New("hex string must be exactly 32 characters (16 bytes)")
+	// ErrValueTooLarge indicates that the value is outside the 128-bit range.
+	ErrValueTooLarge = errors.New("value outside 128‑bit range")
+	// ErrInvalidK indicates that K must be greater than 0.
+	ErrInvalidK = errors.New("K must be > 0")
+	// ErrInvalidU indicates that U must be greater than 0.
+	ErrInvalidU = errors.New("K and U must be > 0")
 )
 
 // ID represents a unique identifier in the DHT network.
 type ID [16]byte
 
-// GenerateID create a new ID based on the content string (address:port:timestamp)
-func GenerateID(addr string) ID {
-	// Combine address, port and current timestamp to ensure uniqueness
-	timestamp := time.Now().UnixNano()
-	content := fmt.Sprintf("%s:%d", addr, timestamp)
+// ----- ID creation and conversion -----
+
+// StringToID converts a string to an ID by generating a 16-byte MD5 hash.
+func StringToID(a string) ID {
 	// Generate a 16-byte MD5 hash that matches our ID type exactly
-	hash := md5.Sum([]byte(content))
+	hash := md5.Sum([]byte(a))
 	return hash
 }
+
+// GenerateID creates a new ID based on the given address by hashing it with a timestamp salt.
+func GenerateID(ip string, port int) ID {
+	// Combine the IP and port into a string
+	addr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+	// insert a timestamp to ensure uniqueness
+	addrWithTimestamp := fmt.Sprintf("%s:%d", addr, time.Now().UnixNano())
+	// Hash the combined string to create a unique ID
+	return StringToID(addrWithTimestamp)
+}
+
+// ToHexString converts the ID to a hexadecimal string representation.
+func (id ID) ToHexString() string {
+	return fmt.Sprintf("%x", id)
+}
+
+// IDFromHexString converts a hexadecimal string representation of an ID back to an ID type.
+func IDFromHexString(hexStr string) (ID, error) {
+	if hexStr == "" {
+		return ID{}, ErrEmptyHexString
+	}
+	var id ID
+	bytes, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return id, fmt.Errorf("invalid hex string: %w", err)
+	}
+	if len(bytes) != len(id) {
+		return id, ErrInvalidHexLength
+	}
+	copy(id[:], bytes)
+	return id, nil
+}
+
+// idToBig converts a 16‑byte big‑endian ID to *big.Int.
+func (id ID) idToBig() *big.Int {
+	return big.NewInt(0).SetBytes(id[:])
+}
+
+// intToID converts an integer 0<=n<2^128 back to [16]byte (big‑endian).
+func bigIntToID(n *big.Int) (ID, error) {
+	var id ID
+	if n.Sign() < 0 || n.Cmp(totalIDs) >= 0 {
+		return ID{}, ErrValueTooLarge
+	}
+	b := n.Bytes()          // may be shorter than 16 bytes
+	copy(id[16-len(b):], b) // left‑pad with zeros
+	return id, nil
+}
+
+// ---- ID comparison -----
 
 // LessThan compares two IDs and returns true if the first ID is less than the second ID.
 func (id ID) LessThan(b ID) bool {
@@ -75,104 +138,74 @@ func (id ID) Next() ID {
 	return next
 }
 
-// ToHexString converts the ID to a hexadecimal string representation.
-func (id ID) ToHexString() string {
-	return fmt.Sprintf("%x", id)
+// Prev returns the previous ID in the ring, wrapping around if necessary.
+func (id ID) Prev() ID {
+	prev := id
+	for i := len(prev) - 1; i >= 0; i-- {
+		if prev[i] == 0 {
+			prev[i] = 0xFF
+		} else {
+			prev[i]--
+			break
+		}
+	}
+	return prev
 }
 
-// IDFromHexString converts a hexadecimal string representation of an ID back to an ID type.
-func IDFromHexString(hexStr string) (ID, error) {
-	if hexStr == "" {
-		return ID{}, ErrEmptyHexString
-	}
-	var id ID
-	bytes, err := hex.DecodeString(hexStr)
-	if err != nil {
-		return id, fmt.Errorf("invalid hex string: %w", err)
-	}
-	if len(bytes) != len(id) {
-		return id, fmt.Errorf("invalid length: expected %d bytes but got %d", len(id), len(bytes))
-	}
-	copy(id[:], bytes)
-	return id, nil
-}
+// ---- Manipulation for slice and Unit Calculation ----
 
-// ---- ID conversion and manipulation for slice and unit calculations ----
-
-// idToInt converts a 16‑byte big‑endian ID to *big.Int.
-func (id ID) idToBig() *big.Int {
-	return big.NewInt(0).SetBytes(id[:])
-}
-
-// intToID converts an integer 0<=n<2^128 back to [16]byte (big‑endian).
-func intToID(n *big.Int) (ID, error) {
-	var id ID
-	if n.Sign() < 0 || n.Cmp(totalIDs) >= 0 {
-		return id, errors.New("value outside 128‑bit range")
+// computeSizes calculates the slice and unit sizes based on the total number of IDs (2^128).
+func computeSizes(K, U int) (sliceSz, unitSz *big.Int, err error) {
+	if K <= 0 {
+		return nil, nil, ErrInvalidK
 	}
-	b := n.Bytes()          // may be shorter than 16 bytes
-	copy(id[16-len(b):], b) // left‑pad with zeros
-	return id, nil
-}
-
-// SliceAndUnit returns (slice, unit) ∈ [1..K] × [1..U] for the given ID,
-// where K and U are plain int.  The mapping is uniform except that the
-// last slice/unit may be larger when 2^128 is not divisible by K·U.
-func (id ID) SliceAndUnit(K, U int) (int, int, error) {
-	if K <= 0 || U <= 0 {
-		return 0, 0, errors.New("K and U must be > 0")
+	if U <= 0 {
+		return nil, nil, ErrInvalidU
 	}
-
-	idInt := id.idToBig()
 	kBig := big.NewInt(int64(K))
 	uBig := big.NewInt(int64(U))
 
-	sliceSz := new(big.Int).Div(totalIDs, kBig) // IDs per slice
-	unitSz := new(big.Int).Div(sliceSz, uBig)   // IDs per unit
+	sliceSz = new(big.Int).Div(totalIDs, kBig)
+	unitSz = new(big.Int).Div(sliceSz, uBig)
+	return sliceSz, unitSz, nil
+}
 
-	sliceIdx := new(big.Int).Div(idInt, sliceSz) // 0‑based
+// SliceAndUnit returns (slice, unit) in [1,...,K]*[1,...,U] for the given ID, where K and U are plain int.
+// The mapping is uniform except that the last slice/unit may be larger when 2^128 is not divisible by K·U.
+func (id ID) SliceAndUnit(K, U int) (int, int, error) {
+	sliceSz, unitSz, err := computeSizes(K, U)
+	if err != nil {
+		return -1, -1, err
+	}
+	idInt := id.idToBig()
+	sliceIdx := new(big.Int).Div(idInt, sliceSz)
 	offset := new(big.Int).Mod(idInt, sliceSz)
-	unitIdx := new(big.Int).Div(offset, unitSz) // 0‑based
+	unitIdx := new(big.Int).Div(offset, unitSz)
 
 	return int(sliceIdx.Int64()) + 1, int(unitIdx.Int64()) + 1, nil
 }
 
-// FirstIDOfSlice returns the first ID of the slice that contains id.
-func (id ID) FirstIDOfSlice(K int) (ID, error) {
-	if K <= 0 {
-		return ID{}, errors.New("K must be > 0")
-	}
-	idInt := id.idToBig()
-	kBig := big.NewInt(int64(K))
-	sliceSz := new(big.Int).Div(totalIDs, kBig)
-
-	sliceIdx := new(big.Int).Div(idInt, sliceSz) // 0‑based
-	startInt := new(big.Int).Mul(sliceIdx, sliceSz)
-
-	return intToID(startInt)
-}
-
 // FirstIDOfUnit returns the first ID of the unit that contains id.
 func (id ID) FirstIDOfUnit(K, U int) (ID, error) {
-	if K <= 0 || U <= 0 {
-		return ID{}, errors.New("K and U must be > 0")
+	sliceSz, unitSz, err := computeSizes(K, U)
+	if err != nil {
+		return ID{}, err
 	}
 	idInt := id.idToBig()
-	kBig := big.NewInt(int64(K))
-	uBig := big.NewInt(int64(U))
-
-	sliceSz := new(big.Int).Div(totalIDs, kBig)
-	unitSz := new(big.Int).Div(sliceSz, uBig)
-
 	sliceIdx := new(big.Int).Div(idInt, sliceSz)
 	offset := new(big.Int).Mod(idInt, sliceSz)
 	unitIdx := new(big.Int).Div(offset, unitSz)
 
 	startInt := new(big.Int).Add(
-		new(big.Int).Mul(sliceIdx, sliceSz), // slice start
-		new(big.Int).Mul(unitIdx, unitSz),   // unit offset
+		new(big.Int).Mul(sliceIdx, sliceSz),
+		new(big.Int).Mul(unitIdx, unitSz),
 	)
-	return intToID(startInt)
+	return bigIntToID(startInt)
+}
+
+// FirstIDOfSlice returns the first ID of the slice that contains id.
+func (id ID) FirstIDOfSlice(K int) (ID, error) {
+	return id.FirstIDOfUnit(K, 1)
 }
 
 // SameSlice reports whether id and other fall into the same slice
@@ -181,19 +214,15 @@ func (id ID) FirstIDOfUnit(K, U int) (ID, error) {
 //	true  → both IDs map to the identical slice index
 //	false → they map to different slices
 func (id ID) SameSlice(other ID, K int) (bool, error) {
-	if K <= 0 {
-		return false, errors.New("K must be > 0")
+	s1, _, err := id.SliceAndUnit(K, 1)
+	if err != nil {
+		return false, err
 	}
-
-	kBig := big.NewInt(int64(K))
-	sliceSz := new(big.Int).Div(totalIDs, kBig)
-
-	// slice index of receiver
-	idx1 := new(big.Int).Div(id.idToBig(), sliceSz).Int64()
-	// slice index of the parameter
-	idx2 := new(big.Int).Div(other.idToBig(), sliceSz).Int64()
-
-	return idx1 == idx2, nil
+	s2, _, err := other.SliceAndUnit(K, 1)
+	if err != nil {
+		return false, err
+	}
+	return s1 == s2, nil
 }
 
 // SameUnit reports whether id and other fall into the same unit
@@ -201,25 +230,13 @@ func (id ID) SameSlice(other ID, K int) (bool, error) {
 //
 // Returns true if both IDs share *both* slice and unit indices.
 func (id ID) SameUnit(other ID, K, U int) (bool, error) {
-	if K <= 0 || U <= 0 {
-		return false, errors.New("K and U must be > 0")
+	s1, u1, err := id.SliceAndUnit(K, U)
+	if err != nil {
+		return false, err
 	}
-
-	kBig := big.NewInt(int64(K))
-	uBig := big.NewInt(int64(U))
-
-	sliceSz := new(big.Int).Div(totalIDs, kBig)
-	unitSz := new(big.Int).Div(sliceSz, uBig)
-
-	// --- receiver indices ---
-	offset1 := new(big.Int).Mod(id.idToBig(), sliceSz)
-	slice1 := new(big.Int).Div(id.idToBig(), sliceSz).Int64()
-	unit1 := new(big.Int).Div(offset1, unitSz).Int64()
-
-	// --- parameter indices ---
-	offset2 := new(big.Int).Mod(other.idToBig(), sliceSz)
-	slice2 := new(big.Int).Div(other.idToBig(), sliceSz).Int64()
-	unit2 := new(big.Int).Div(offset2, unitSz).Int64()
-
-	return slice1 == slice2 && unit1 == unit2, nil
+	s2, u2, err := other.SliceAndUnit(K, U)
+	if err != nil {
+		return false, err
+	}
+	return s1 == s2 && u1 == u2, nil
 }
