@@ -1,8 +1,8 @@
 {
   "node": {
-    "id": "d2c7ec8277d2b634dd6b709d2037133e",
+    "id": "3b6e24cb886a6f947df652cb72b30cac",
     "ip": "192.168.1.107",
-    "port": 44401,
+    "port": 37863,
     "main_storage": "/home/flavio/dht_storage2",
     "predecessor_storage": "/home/flavio/.dht_predecessor",
     "successor_storage": "/home/flavio/.dht_successor",
@@ -12,6 +12,6 @@
   "dht": {
     "K": 16,
     "U": 20,
-    "bootstrap_node": "192.168.1.107:42887"
+    "bootstrap_node": "192.168.1.107:44969"
   }
 }

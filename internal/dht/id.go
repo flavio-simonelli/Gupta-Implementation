@@ -50,16 +50,29 @@ func (id ID) Equals(b ID) bool {
 }
 
 // IsOwnedBy return true if myID in (startID, endID] in the ring.
-func (myID ID) IsOwnedBy(startID, endID ID) bool {
+func (id ID) IsOwnedBy(startID, endID ID) bool {
 	if startID.LessThan(endID) {
 		// normal case: predID < resID < myID
-		return myID.Equals(endID) || myID.Equals(endID) && startID.LessThan(myID)
+		return id.Equals(endID) || id.Equals(endID) && startID.LessThan(id)
 	} else if startID.Equals(endID) {
 		// special case: predID == resID, i.e. the node is alone in the ring
-		return myID.Equals(startID)
+		return id.Equals(startID)
 	}
 	// wrap‑around
-	return myID.Equals(endID) || myID.LessThan(endID) || startID.LessThan(myID)
+	return id.Equals(endID) || id.LessThan(endID) || startID.LessThan(id)
+}
+
+// Next returns the next ID in the ring, wrapping around if necessary.
+func (id ID) Next() ID {
+	next := id
+	// Increment the ID by 1, which is equivalent to adding 1 to the last byte.
+	for i := len(next) - 1; i >= 0; i-- {
+		next[i]++
+		if next[i] != 0 {
+			break
+		}
+	}
+	return next
 }
 
 // ToHexString converts the ID to a hexadecimal string representation.

@@ -24,6 +24,7 @@ var (
 	ErrDeadlineExceeded  = errors.New("deadline exceeded, operation timed out")
 	ErrServerUnavailable = errors.New("service unavailable, no connection available")
 	ErrRedirectSuccessor = errors.New("redirect to another successor node, operation not supported yet")
+	ErrRedirect          = errors.New("redirect to another node, operation not supported yet")
 )
 
 // ----- ConnectionInfo struct and operations on a single gRPC connection -----
@@ -373,6 +374,57 @@ func (p *ConnectionPool) BecomePredecessor(id dht.ID, addr string, sn bool, tabl
 
 	if len(filePipe) != 0 {
 		return "", fmt.Errorf("stream ended but %d file incomplete", len(filePipe))
+	}
+	return "", nil
+}
+
+// NotifyPredecessor notifies the predecessor node about the new successor node.
+func (p *ConnectionPool) NotifyPredecessor(id dht.ID, addr string, sn bool, target string) (string, error) {
+	// create a context for the gRPC call
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel() // ensure the context is cancelled after use
+	// get a connection to the target node
+	info, err := p.GetConnection(target)
+	if err != nil {
+		return "", err
+	}
+	defer func(info *ConnectionInfo) {
+		_ = info.release()
+	}(info) // ensure the connection is released after use
+	client := pb.NewJoinServiceClient(info.conn)
+	// build the request
+	req := &pb.NotifyPredecessorRequest{
+		NewSuccessor: &pb.Node{
+			NodeId: &pb.NodeId{
+				NodeId: id.ToHexString(),
+			},
+			Address: &pb.NodeAddress{
+				Address: addr,
+			},
+			Supernode: sn,
+		},
+	}
+	// call the remote method
+	_, err = client.NotifyPredecessor(ctx, req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", ErrDeadlineExceeded
+		}
+		if status.Code(err) == codes.Unavailable {
+			return "", ErrServerUnavailable
+		}
+		if status.Code(err) == codes.FailedPrecondition {
+			st, ok := status.FromError(err)
+			if ok {
+				for _, detail := range st.Details() {
+					if redirect, ok := detail.(*pb.RedirectInfo); ok {
+						logger.Log.Errorf("Redirecting to predecessor %s", redirect.Target.Address)
+						return redirect.Target.Address, ErrRedirect
+					}
+				}
+			}
+		}
+		return "", fmt.Errorf("error notifying predecessor: %w", err)
 	}
 	return "", nil
 }

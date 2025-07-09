@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 	_ "google.golang.org/grpc/status"
 	_ "google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"io"
 	"net"
 	"strconv"
@@ -267,4 +268,39 @@ func (s *Server) BecomePredecessor(req *pb.BecomePredecessorRequest, stream pb.J
 		}
 	}
 	return nil
+}
+
+// NotifyPredecessor handles the gRPC call to notify a predecessor
+func (s *Server) NotifyPredecessor(ctx context.Context, req *pb.NotifyPredecessorRequest) (*emptypb.Empty, error) {
+	logger.Log.Infof("Received NotifyPredecessorRequest for node ID: %s", req.NewSuccessor.NodeId.NodeId)
+	// parse the node ID from the request
+	newId, err := dht.IDFromHexString(req.NewSuccessor.NodeId.NodeId)
+	if err != nil {
+		logger.Log.Warnf("Invalid node ID: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
+	}
+	// change the predecessor
+	oldPred, err := s.node.T.ChangeSuccessor(newId, req.NewSuccessor.Address.Address, req.NewSuccessor.Supernode, s.node.K, s.node.U)
+	if err != nil {
+		if errors.Is(err, dht.ErrRedirectSucc) {
+			// Redirect to the successor if the new ID is not greater than the current predecessor
+			logger.Log.Warnf("Redirecting to successor: %v", oldPred)
+			st := status.New(codes.FailedPrecondition, "not the real successor")
+			stWithInfo, err := st.WithDetails(&pb.RedirectInfo{
+				Target: &pb.NodeAddress{
+					Address: oldPred,
+				},
+			})
+			if err != nil {
+				logger.Log.Errorf("Error creating redirect info: %v", err)
+				return nil, status.Errorf(codes.Internal, "error creating redirect info: %v", err)
+			}
+			return nil, stWithInfo.Err()
+		} else {
+			logger.Log.Errorf("Error changing predecessor: %v", err)
+			return nil, status.Errorf(codes.Internal, "error changing predecessor: %v", err)
+		}
+	}
+	logger.Log.Infof("Changed predecessor to %s for node ID %s", req.NewSuccessor.Address.Address, newId.ToHexString())
+	return &emptypb.Empty{}, nil
 }

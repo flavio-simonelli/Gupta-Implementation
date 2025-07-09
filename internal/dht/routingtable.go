@@ -160,9 +160,6 @@ func (rt *RoutingTable) removeEntry(id ID) error {
 	// find the position of the entry to remove
 	_, idx, err := rt.findEntry(id)
 	if err != nil {
-		if errors.Is(err, ErrEntryNotFound) {
-			return ErrEntryNotFound // if the entry is not found, we return an error
-		}
 		return fmt.Errorf("failed to find entry for removal: %w", err) // return the error if something went wrong
 	}
 	copy(rt.entries[idx:], rt.entries[idx+1:])  // shift the entries to the left
@@ -191,6 +188,29 @@ func (t *Table) FindSuccessor(id ID) (*RoutingEntry, int, error) {
 		return nil, -1, fmt.Errorf("failed to find successor: %w", err) // return the error if something went wrong
 	}
 	return entry, idx, nil // return the entry and its index if found
+}
+
+// FindPredecessor finds the predecessor of a given ID in the RoutingTable. It returns the entry and its index if found, otherwise returns an error. (Thread-safe)
+func (t *Table) FindPredecessor(id ID) (*RoutingEntry, int, error) {
+	// control parameters
+	if id == (ID{}) {
+		return nil, -1, ErrInvalidParameters // if the ID is empty, we return an error
+	}
+	// lock the read mutex to ensure thread safety
+	t.rt.mu.RLock()
+	defer t.rt.mu.RUnlock() // unlock the table at the end of the reading
+	// find the entry in the routing table
+	_, idx, err := t.rt.binarySearchLittleMore(id, 0, len(t.rt.entries)-1)
+	if err != nil {
+		if errors.Is(err, ErrWarpAround) {
+			return t.rt.entries[len(t.rt.entries)-1], len(t.rt.entries) - 1, nil
+		}
+		return nil, -1, fmt.Errorf("failed to find predecessor: %w", err) // return the error if something went wrong
+	}
+	if idx == 0 {
+		return t.rt.entries[len(t.rt.entries)-1], len(t.rt.entries) - 1, nil // Warp around case, if the index is 0, we return the last entry as the predecessor
+	}
+	return t.rt.entries[idx-1], idx - 1, nil
 }
 
 // FindEntry finds a RoutingEntry in the RoutingTable by its ID. It returns the entry and its index if found, otherwise returns an error. (Thread-safe)
@@ -461,6 +481,18 @@ func (t *Table) RemoveEntry(id ID) error {
 			return fmt.Errorf("failed to remove entry from slice leaders table: %w", err)
 		}
 	}
+	// if the entry was the predecessor, we remove it from the predecessor entry
+	if t.Pred.entry != nil && t.Pred.entry.ID.Equals(id) {
+		t.Pred.mu.Lock()
+		defer t.Pred.mu.Unlock() // unlock the predecessor entry at the end of the writing
+		t.Pred.entry = nil       // set the predecessor entry to nil
+	}
+	// if the entry was the successor, we remove it from the successor entry
+	if t.Succ.entry != nil && t.Succ.entry.ID.Equals(id) {
+		t.Succ.mu.Lock()
+		defer t.Succ.mu.Unlock() // unlock the successor entry at the end of the writing
+		t.Succ.entry = nil       // set the successor entry to nil
+	}
 	return nil // return nil if the removal was successful
 }
 
@@ -497,6 +529,41 @@ func (t *Table) ChangePredecessor(id ID, address string, supernode bool, K, U in
 	}
 	// if the predecessor already exists and is greater than the new entry, we return the address of the old predecessor
 	return t.Pred.entry.Address, ErrPredRedirect
+}
+
+// ChangeSuccessor changes the successor of the node to the given RoutingEntry. It returns an error if the entry is invalid or if the successor already exists, return the address of real successor. (Thread-safe)
+func (t *Table) ChangeSuccessor(id ID, address string, supernode bool, K, U int) (string, error) {
+	// control parameters
+	if address == "" || id == (ID{}) {
+		return "", ErrInvalidParameters // if the ID or address is empty, we return an error
+	}
+	// add the entry to the routing table
+	err := t.AddEntry(id, address, supernode, false, false, K, U)
+	if err != nil && !errors.Is(err, ErrEntryAlreadyExists) {
+		return "", fmt.Errorf("failed to add entry to routing table: %w", err)
+	}
+	// lock the successor entry for writing
+	t.Succ.mu.Lock()
+	defer t.Succ.mu.Unlock() // unlock the successor entry at the end of the writing
+	// check if the node is really a new successor
+	if t.Succ.entry == nil || id.LessThan(t.Succ.entry.ID) {
+		// get the entry from the routing table
+		entry, _, err := t.FindEntry(id)
+		if err != nil {
+			return "", fmt.Errorf("failed to find entry for successor: %w", err)
+		}
+		// change the successor entry to the new entry
+		old := ""
+		if t.Succ.entry != nil {
+			old = t.Succ.entry.Address // save the old successor address
+		} else {
+			old = "" // if the successor was nil, we set the old address to empty
+		}
+		t.Succ.entry = entry
+		return old, nil
+	}
+	// if the successor already exists and is greater than the new entry, we return the address of the old successor
+	return t.Succ.entry.Address, ErrPredRedirect
 }
 
 // ----- Transport Convention -----

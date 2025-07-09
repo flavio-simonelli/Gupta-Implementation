@@ -20,7 +20,7 @@ type Communicator interface {
 	// BecomePredecessor sends a join request to the successor node in addr
 	BecomePredecessor(id ID, addr string, sn bool, table *Table, store *Storage, K int, U int, target string) (string, error)
 	// NotifyPredecessor notifies the predecessor node in addr that this node is its successor
-	//NotifyPredecessor(ctx context.Context, addr string) error
+	NotifyPredecessor(id ID, addr string, sn bool, target string) (string, error)
 	// Notify notifies a nod one or more events
 	//Notify(ctx context.Context, addr string, event string) error
 	// per adesso ci fermiamo alla join
@@ -95,15 +95,52 @@ func (n *Node) Join(bootstrap string) error {
 			target = temp
 			logger.Log.Warnf("Redirected to another successor node, retrying with new target: %s", target)
 		}
-		// set successor and predecessor in the routing table
+		// set successor in the routing table
+		succ, _, err := n.T.FindSuccessor(n.ID.Next())
+		if err != nil {
+			logger.Log.Errorf("Error Find successor for set successor during the join: %v", err)
+			return fmt.Errorf("error finding successor for set successor during the join: %w", err)
+		}
+		if succ.Address != target {
+			logger.Log.Errorf("Expected successor address %s, but got %s during set successor", target, succ.Address)
+			return fmt.Errorf("expected successor address %s, but got %s during set successor", target, succ.Address)
+		}
+		for old, err := n.T.ChangeSuccessor(succ.ID, succ.Address, false, n.K, n.U); err != nil; {
+			if !errors.Is(err, ErrRedirectSucc) {
+				return fmt.Errorf("error changing successor node to successor during the join: %w", err)
+			}
+			succ, _, err = n.T.FindSuccessor(n.ID.Next())
+			if err != nil {
+				logger.Log.Errorf("Error Find successor for set successor during the join: %v", err)
+				return fmt.Errorf("error finding successor for set successor during the join: %w", err)
+			}
+			if succ.Address != old {
+				logger.Log.Warnf("Redirected to another successor node, retrying with new target: %s", succ.Address)
+				continue
+			}
+			break
+		}
 		// contact the predecessor node to notify it that this node is its successor
+		pred, _, err := n.T.FindPredecessor(n.ID)
+		if err != nil {
+			logger.Log.Errorf("Error finding predecessor during the join: %v", err)
+			return fmt.Errorf("error finding predecessor during the join: %w", err)
+		}
+		for temp, err := n.net.NotifyPredecessor(n.ID, n.Addr, n.Supernode, pred.Address); err != nil; {
+			if !errors.Is(err, ErrRedirectSucc) {
+				return fmt.Errorf("%w: %w", ErrContactSucc, err)
+			}
+			target = temp
+			logger.Log.Warnf("Redirected to another successor node, retrying with new target: %s", target)
+		}
+		// set the predecessor in the routing table
 		// notify the slice leader that this node is joined the DHT network
 	}
 	return nil
 }
 
-func (n *Node) Leave() error {
+/*func (n *Node) Leave() error {
 	// Notify the successor that this node is leaving the DHT network (send all resources to the successor)
 	// Notify the predecessor that this node is leaving the DHT network
 	// Notify the slice leader that this node is leaving the DHT network
-}
+}*/
