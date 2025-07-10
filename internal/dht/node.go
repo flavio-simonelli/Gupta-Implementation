@@ -27,14 +27,16 @@ type Communicator interface {
 }
 
 type Node struct {
-	ID          ID           // Unique identifier for the node
-	Addr        string       // Address of the server in this node (ip:port)
-	T           *Table       // Routing table for the node
-	Supernode   bool         // true if this node is a supernode
-	UnitLeader  bool         // true if this node is a unit leader
-	SliceLeader bool         // true if this node is a slice leader
-	net         Communicator // Communicator interface for network operations (client)
-	Store       *Storage     // Storage for the node, can be nil if not used
+	ID            ID           // Unique identifier for the node
+	Addr          string       // Address of the server in this node (ip:port)
+	T             *Table       // Routing table for the node
+	Supernode     bool         // true if this node is a supernode
+	UnitLeader    bool         // true if this node is a unit leader
+	SliceLeader   bool         // true if this node is a slice leader
+	net           Communicator // Communicator interface for network operations (client)
+	Store         *Storage     // Storage for the node, can be nil if not used
+	StandardBoard *NormalBoard
+	LeaderBoard   *SliceLeaderBoard //  board of events use only if the node is a slice leader
 }
 
 // NewNode creates a new Node with the given ID, address, and communicator and initializes empty routing tables.
