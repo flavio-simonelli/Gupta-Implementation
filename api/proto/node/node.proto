@@ -31,9 +31,7 @@ message RedirectInfo {
 // ----- message dissemination -----
 enum EventType {
   JOIN  = 0;
-  LEAVE_NORMAL  = 1;
-  LEAVE_UNITLEADER  = 2;
-  LEAVE_SLICELEADER  = 3;
+  LEAVE = 1;
 }
 
 message Event {
