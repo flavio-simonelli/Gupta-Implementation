@@ -110,6 +110,7 @@ func RunServer(node *dht.Node, lis net.Listener) error {
 	return nil
 }
 
+// Find successor lato server invece è semplicemente una funzione che richiede qual'è il successore di un certo ID, effettua la ricerca nella routing table e restituisce l'indirizzo del successore trovato.
 // FindSuccessor handles the gRPC call to find a successor (manca la gestione del timeout nel context)
 func (s *Server) FindSuccessor(ctx context.Context, req *pb.FindSuccessorRequest) (*pb.FindSuccessorResponse, error) {
 	// get the node ID from the request
@@ -132,6 +133,12 @@ func (s *Server) FindSuccessor(ctx context.Context, req *pb.FindSuccessorRequest
 	}, nil
 }
 
+/* Questa funzione di become predecessor nel server quando viene chiamata deve fare questo:
+controlla se il nodo chiamante ha id più grande del vecchio predecessore, se no rstituisce un messaggio di redirect.
+Invia la routing table e le risorse al nodo.
+Mette il nodo nello stato di joining, cioè fa partire una goroutine che attende due condizioni: questo nodo riceve un messaggio di notifica dal nodo in joining, o riceve la notifica da un altro nodo che il nodo ha inviato la notifica allo slicer.
+Allo scadere del tempo la goroutine elimina il nodo e lo rimuove dalla routing table dichiarando che il nodo è morto allo slice leader. (cosi se aveva contattato anche il predecessore se en accorge anche lui)
+*/
 // BecomePredecessor handles the gRPC call to become a predecessor
 func (s *Server) BecomePredecessor(req *pb.BecomePredecessorRequest, stream pb.JoinService_BecomePredecessorServer) error {
 	logger.Log.Infof("Received BecomePredecessorRequest for node ID: %s", req.Node.NodeId.NodeId)
@@ -270,6 +277,8 @@ func (s *Server) BecomePredecessor(req *pb.BecomePredecessorRequest, stream pb.J
 	return nil
 }
 
+// BecomeSuccessor è una funzione che invece semplicemente cambia il successore del nodo server nel nodo chiamante se quest'ultimo ha id più piccolo rispetto al vecchio predecessore altrimenti restituisce redirect info
+// Quando inoltreremo le notidfiche faremo un if che dice se è il predecessore ad iniviarlo invia al successore altrimenti invia al predecessore
 // NotifyPredecessor handles the gRPC call to notify a predecessor
 func (s *Server) NotifyPredecessor(ctx context.Context, req *pb.NotifyPredecessorRequest) (*emptypb.Empty, error) {
 	logger.Log.Infof("Received NotifyPredecessorRequest for node ID: %s", req.NewSuccessor.NodeId.NodeId)

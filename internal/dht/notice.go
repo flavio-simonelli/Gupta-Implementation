@@ -1,5 +1,7 @@
 package dht
 
+import "sync"
+
 // EventType represents the type of event in the DHT network
 type EventType int
 
@@ -46,4 +48,39 @@ func (e Event) ApplyEvent(t *Table, K int, U int) error {
 	default:
 		return nil // No action for unknown event types
 	}
+}
+
+// BufferEvent function buffers the event for later processing used by Slice Leader
+type BufferEvent struct {
+	events []Event
+	mu     sync.Mutex // Mutex to protect access to the events slice
+}
+
+// NewBufferEvent creates a new BufferEvent instance
+func NewBufferEvent() *BufferEvent {
+	return &BufferEvent{
+		events: make([]Event, 0),
+	}
+}
+
+// AddEvent adds an event to the buffer
+func (be *BufferEvent) AddEvent(event Event) {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	be.events = append(be.events, event)
+}
+
+// GetEvents retrieves all buffered events and clears the buffer
+func (be *BufferEvent) GetEvents() []Event {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	events := be.events
+	return events
+}
+
+// ClearEvents clears the buffered events
+func (be *BufferEvent) ClearEvents() {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	be.events = make([]Event, 0)
 }

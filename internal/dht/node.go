@@ -27,8 +27,6 @@ type Communicator interface {
 }
 
 type Node struct {
-	U           int          // number of units for each slice
-	K           int          // number of slices in the DHT
 	ID          ID           // Unique identifier for the node
 	Addr        string       // Address of the server in this node (ip:port)
 	T           *Table       // Routing table for the node
@@ -95,6 +93,7 @@ func (n *Node) Join(bootstrap string) error {
 			target = temp
 			logger.Log.Warnf("Redirected to another successor node, retrying with new target: %s", target)
 		}
+		//TODO: check if the node have a slice leader and unit leader, if not, set this node as slice leader and unit leader contattando gli sltri slice leader o il solo slice leader sevuole diventare unit leader
 		// set successor in the routing table
 		succ, _, err := n.T.FindSuccessor(n.ID.Next())
 		if err != nil {
@@ -143,4 +142,8 @@ func (n *Node) Join(bootstrap string) error {
 	// Notify the successor that this node is leaving the DHT network (send all resources to the successor)
 	// Notify the predecessor that this node is leaving the DHT network
 	// Notify the slice leader that this node is leaving the DHT network
-}*/
+}
+
+func (n *Node)GetResources() ()
+
+*/

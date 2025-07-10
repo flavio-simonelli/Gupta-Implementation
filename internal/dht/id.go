@@ -12,8 +12,10 @@ import (
 
 var (
 	totalIDs = new(big.Int).Lsh(big.NewInt(1), 128) // 2^128 total IDs in the DHT ring
-	K        int                                    // Number of slices in the DHT ring, must be > 0
-	U        int                                    // Number of units per slice in the DHT ring, must be > 0
+	k        int                                    // Number of slices in the DHT ring, must be > 0
+	u        int                                    // Number of units per slice in the DHT ring, must be > 0
+	sliceSz  *big.Int                               // Size of each slice in the DHT ring
+	unitSz   *big.Int                               // Size of each unit in the DHT ring
 
 	// Possible Errors
 	// ErrEmptyHexString indicates that the provided hexadecimal string is empty.
@@ -155,57 +157,48 @@ func (id ID) Prev() ID {
 // ---- Manipulation for slice and Unit Calculation ----
 
 // computeSizes calculates the slice and unit sizes based on the total number of IDs (2^128).
-func computeSizes(K, U int) (sliceSz, unitSz *big.Int, err error) {
-	if K <= 0 {
+func ComputeSizes() (sliceSz, unitSz *big.Int, err error) {
+	if k <= 0 {
 		return nil, nil, ErrInvalidK
 	}
-	if U <= 0 {
+	if u <= 0 {
 		return nil, nil, ErrInvalidU
 	}
-	kBig := big.NewInt(int64(K))
-	uBig := big.NewInt(int64(U))
+	kBig := big.NewInt(int64(k))
+	uBig := big.NewInt(int64(u))
 
 	sliceSz = new(big.Int).Div(totalIDs, kBig)
 	unitSz = new(big.Int).Div(sliceSz, uBig)
 	return sliceSz, unitSz, nil
 }
 
-// SliceAndUnit returns (slice, unit) in [1,...,K]*[1,...,U] for the given ID, where K and U are plain int.
+// SliceAndUnit returns (slice, unit) in [0,...,K-1]*[0,...,U-1] for the given ID, where K and U are plain int.
 // The mapping is uniform except that the last slice/unit may be larger when 2^128 is not divisible by K·U.
-func (id ID) SliceAndUnit(K, U int) (int, int, error) {
-	sliceSz, unitSz, err := computeSizes(K, U)
-	if err != nil {
-		return -1, -1, err
-	}
+func (id ID) SliceAndUnit() (int, int) {
 	idInt := id.idToBig()
 	sliceIdx := new(big.Int).Div(idInt, sliceSz)
 	offset := new(big.Int).Mod(idInt, sliceSz)
 	unitIdx := new(big.Int).Div(offset, unitSz)
 
-	return int(sliceIdx.Int64()) + 1, int(unitIdx.Int64()) + 1, nil
+	return int(sliceIdx.Int64()), int(unitIdx.Int64())
 }
 
 // FirstIDOfUnit returns the first ID of the unit that contains id.
-func (id ID) FirstIDOfUnit(K, U int) (ID, error) {
-	sliceSz, unitSz, err := computeSizes(K, U)
-	if err != nil {
-		return ID{}, err
-	}
-	idInt := id.idToBig()
-	sliceIdx := new(big.Int).Div(idInt, sliceSz)
-	offset := new(big.Int).Mod(idInt, sliceSz)
-	unitIdx := new(big.Int).Div(offset, unitSz)
+func (id ID) FirstIDOfUnit() (ID, error) {
+	sliceIdx, unitIdx := id.SliceAndUnit()
 
 	startInt := new(big.Int).Add(
-		new(big.Int).Mul(sliceIdx, sliceSz),
-		new(big.Int).Mul(unitIdx, unitSz),
+		new(big.Int).Mul(big.NewInt(int64(sliceIdx)), sliceSz),
+		new(big.Int).Mul(big.NewInt(int64(unitIdx)), unitSz),
 	)
 	return bigIntToID(startInt)
 }
 
 // FirstIDOfSlice returns the first ID of the slice that contains id.
-func (id ID) FirstIDOfSlice(K int) (ID, error) {
-	return id.FirstIDOfUnit(K, 1)
+func (id ID) FirstIDOfSlice() (ID, error) {
+	sliceIdx, _ := id.SliceAndUnit()
+	startInt := new(big.Int).Mul(big.NewInt(int64(sliceIdx)), sliceSz)
+	return bigIntToID(startInt)
 }
 
 // SameSlice reports whether id and other fall into the same slice
@@ -213,30 +206,18 @@ func (id ID) FirstIDOfSlice(K int) (ID, error) {
 //
 //	true  → both IDs map to the identical slice index
 //	false → they map to different slices
-func (id ID) SameSlice(other ID, K int) (bool, error) {
-	s1, _, err := id.SliceAndUnit(K, 1)
-	if err != nil {
-		return false, err
-	}
-	s2, _, err := other.SliceAndUnit(K, 1)
-	if err != nil {
-		return false, err
-	}
-	return s1 == s2, nil
+func (id ID) SameSlice(other ID) bool {
+	s1, _ := id.SliceAndUnit()
+	s2, _ := other.SliceAndUnit()
+	return s1 == s2
 }
 
 // SameUnit reports whether id and other fall into the same unit
 // when the ID space is partitioned into K slices and U units per slice.
 //
 // Returns true if both IDs share *both* slice and unit indices.
-func (id ID) SameUnit(other ID, K, U int) (bool, error) {
-	s1, u1, err := id.SliceAndUnit(K, U)
-	if err != nil {
-		return false, err
-	}
-	s2, u2, err := other.SliceAndUnit(K, U)
-	if err != nil {
-		return false, err
-	}
-	return s1 == s2 && u1 == u2, nil
+func (id ID) SameUnit(other ID) bool {
+	s1, u1 := id.SliceAndUnit()
+	s2, u2 := other.SliceAndUnit()
+	return s1 == s2 && u1 == u2
 }

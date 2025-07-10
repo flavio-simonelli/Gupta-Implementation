@@ -219,6 +219,8 @@ func (p *ConnectionPool) Close(ctx context.Context) error {
 
 // ----- grpc Handlers for DHT operations -----
 
+// FindSucccessor è la funzione che un nuovo nodo che vuole unirsi alla rete usa per contattare il nodo di bootstrap per conoscere il suo successore.
+// Riceve in input l'id del nodo che vuole unirsi alla rete e l'indirizzo del nodo di bootstrap. Viene restituito l'indirizzo del successore del nodo che ha l'id più vicino a quello del nodo che vuole unirsi alla rete o errore
 // FindSuccessor finds the successor of a given ID in the DHT network by contacting the target node, return an error E
 func (p *ConnectionPool) FindSuccessor(id dht.ID, target string, timeout time.Duration) (string, error) {
 	// create a context with timeout for the gRPC call
@@ -256,6 +258,7 @@ func (p *ConnectionPool) FindSuccessor(id dht.ID, target string, timeout time.Du
 	return resp.Address.Address, nil
 }
 
+// Become predecessore è la funzione che un nuovo nodo effettua quando deve entrare nella rete, contatta quello che è il suo successore per ricevere la routing table aggioranta e le risorse che deve mantenere, se non è lui il successore perchè il suo id è più piccolo del vecchio predecessore riceve un messaggio di redirect
 // BecomePredecessor sends a join request to the successor node in addr and returns the routing entries received from the successor and the resource
 func (p *ConnectionPool) BecomePredecessor(id dht.ID, addr string, sn bool, table *dht.Table, store *dht.Storage, K int, U int, target string) (string, error) {
 	// create a context for the gRPC call

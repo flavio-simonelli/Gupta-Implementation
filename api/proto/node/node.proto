@@ -7,31 +7,25 @@ option go_package = "github.com/flavio-simonelli/Gupta-Implementation/api/proto/
 
 import "google/protobuf/empty.proto"; // minimal ack
 
-message NodeId {
-  string node_id = 1; // Unique identifier for the node in hexadecimal format
-}
-
-message NodeAddress {
-  string address = 1; // address of the node in the format "ip:port"
-}
-
 message Node {
-  NodeId node_id = 1; // Unique identifier for the node
-  NodeAddress address = 2; // address of the node in the format "ip:port"
+  string node_id = 1; // Unique identifier for the node in hexadecimal format
+  string address = 2; // address of the node in the format "ip:port"
+}
+
+message NodeInfo {
+  Node node = 1; // Node information
   bool supernode = 3; // Indicates if the node is a supernode
 }
 
 message Entry {
-  string node_id = 1; // Unique identifier for the node in hexadecimal format
-  string address = 2; // address of the node in the format "ip:port"
-  bool is_supernode = 3; // Indicates if the node is a supernode
+  NodeInfo node = 1;
   bool is_slice_leader = 4; // Indicates if the node is a slice leader
   bool is_unit_leader = 5; // Indicates if the node is a unit leader
 }
 
 // ----- Info di redirect da inserire in google.rpc.Status.details -----
 message RedirectInfo {
-  NodeAddress target = 1;      // Node to which the request should be redirected
+  string target = 1;      // Node to which the request should be redirected
 }
 
 // ----- message dissemination -----
@@ -42,20 +36,19 @@ enum EventType {
   LEAVE_SLICELEADER  = 3;
 }
 
-message NotifyMessage {
-  Node node = 1; // Node interested in the message
+message Event {
+  Entry entry = 1;
   EventType event_type = 2; // Type of event (JOIN, LEAVE_NORMAL, LEAVE_UNITLEADER, LEAVE_SLICELEADER)
 }
 
 // ----- Resource -----
 message ResourceMetadata {
-  string key   = 1;         // id resource
-  string name  = 2;         // name (deriving key)
+  string filename  = 2;         // name (deriving key)
   uint64 size  = 3;         // total size in bytes
 }
 
 message StoreChunk {
-  string resource_key = 1;  // id resource
+  string filename = 1;  // filename (deriving key)
   uint64 offset       = 2;  // byte offset (for resume/verify)
   bytes  data         = 3;  // payload
   bool   eof          = 4;  // true in the last chunk of the resource
@@ -74,24 +67,20 @@ message RoutingTableChunk {
 }
 
 // ----- Join Request -----
-message FindSuccessorRequest {
-  NodeId id = 1; // Unique identifier for the node whose successor is being requested
-}
 message FindSuccessorResponse {
-  NodeAddress address = 1; // address of the node in the format "ip:port"
+  string address = 1; // address of the node in the format "ip:port"
 }
 message BecomePredecessorRequest {
-  Node node = 1; // Node that is becoming the predecessor
+  NodeInfo node = 1; // Node that is becoming the predecessor
 }
 message BecomePredecessorResponse {
   oneof payload {
     RoutingTableChunk routing_chunk = 1; // Routing table chunk
-    ResourceMetadata resource_metadata = 2; // Metadata of the resource
-    StoreChunk store_chunk = 3; // Chunk of the resource
+    Resource resource = 2; // Resource to be stored (one of metadata or chunk)
     }
 }
-message NotifyPredecessorRequest {
-  Node new_successor = 1; // New successor node
+message BecomeSuccessorRequest {
+  NodeInfo new_successor = 1; // New successor node
 }
 
 // ----- Leave Request -----
@@ -111,9 +100,11 @@ message LookupRequest {
 
 // ------ Services ------
 
+// in the header of the packet is always insert the node_id of the sender
+
 service JoinService {
-  // Ritorna SEMPRE OK + successore.
-  rpc FindSuccessor(FindSuccessorRequest)
+  // the id node is in the request header
+  rpc FindSuccessor(google.protobuf.Empty)
       returns (FindSuccessorResponse);
 
   // if the node isn't the successor of the target node:
@@ -123,7 +114,7 @@ service JoinService {
 
   // if the node isn't the predecessor of the target node:
   //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realPredecessor}
-  rpc NotifyPredecessor(NotifyPredecessorRequest)
+  rpc BecomeSuccessor(BecomeSuccessorRequest)
       returns (google.protobuf.Empty);
 
 }
@@ -149,7 +140,6 @@ service StorageService {
 }
 
 service DisseminationService {
-  rpc Notify(NotifyMessage)
-      returns (google.protobuf.Empty);
+  rpc Notify(stream Event) returns (google.protobuf.Empty);
 }
 

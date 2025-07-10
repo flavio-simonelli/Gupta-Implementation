@@ -21,6 +21,9 @@ func main() {
 		logger.Log.WithError(err).Fatal("Error loading configuration")
 		return
 	}
+	// inizializza le varibaili globali in ID.go che sono U e K
+	dht.K = loadConfig.DHT.K
+	dht.U = loadConfig.DHT.U
 	// get listener address and port
 	listener, err := transport.GetListener(loadConfig.Node.IP, loadConfig.Node.Port)
 	if err != nil {
@@ -43,7 +46,7 @@ func main() {
 	}
 	logger.Log.Infof("Initialized node storage at: %s", loadConfig.Node.MainStorage)
 	// create a new node with the configuration
-	node, err := dht.NewNode(loadConfig.DHT.U, loadConfig.DHT.K, loadConfig.Node.ID, listener.Addr().String(), client, loadConfig.Node.Supernode, store)
+	node, err := dht.NewNode(loadConfig.Node.ID, listener.Addr().String(), client, loadConfig.Node.Supernode, store)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error creating DHT node struct")
 		return
