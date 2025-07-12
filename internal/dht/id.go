@@ -118,7 +118,7 @@ func (id ID) Equals(b ID) bool {
 func (id ID) IsOwnedBy(startID, endID ID) bool {
 	if startID.LessThan(endID) {
 		// normal case: predID < resID < myID
-		return id.Equals(endID) || id.Equals(endID) && startID.LessThan(id)
+		return id.Equals(endID) || id.LessThan(endID) && startID.LessThan(id)
 	} else if startID.Equals(endID) {
 		// special case: predID == resID, i.e. the node is alone in the ring
 		return id.Equals(startID)
@@ -220,4 +220,36 @@ func (id ID) SameUnit(other ID) bool {
 	s1, u1 := id.SliceAndUnit()
 	s2, u2 := other.SliceAndUnit()
 	return s1 == s2 && u1 == u2
+}
+
+// ---- Initialization of ID Parameters -----
+
+// InitializeIDParameters initializes the global parameters for the DHT network.
+func InitializeIDParameters(kVal, uVal int) error {
+	if kVal <= 0 {
+		return ErrInvalidK
+	}
+	if uVal <= 0 {
+		return ErrInvalidU
+	}
+	k = kVal
+	u = uVal
+
+	var err error
+	sliceSz, unitSz, err = ComputeSizes()
+	if err != nil {
+		return fmt.Errorf("error computing slice and unit sizes: %w", err)
+	}
+
+	return nil
+}
+
+// GetK returns the number of slices in the DHT network.
+func GetK() int {
+	return k
+}
+
+// GetU returns the number of units per slice in the DHT network.
+func GetU() int {
+	return u
 }

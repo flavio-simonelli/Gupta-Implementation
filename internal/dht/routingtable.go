@@ -12,6 +12,11 @@ import (
 
 // Errors defined for the RoutingTable operations.
 var (
+	// Global Parameters for the routing table
+	RTChunkSize   = 10          //TODO: prendere da config file       // Size of each chunk for routing table entries
+	timeKeepAlive time.Duration // Time to wait before control the keep alive of the neighbors
+
+	// errors
 	// ErrEmptyId indicates that the provided ID is empty.
 	ErrEmptyID = errors.New("ID cannot be empty")
 	// ErrWarpAround indicates that the ID is greater than the last entry in the routing table, so the successor is the first entry in the routing table.
@@ -64,12 +69,13 @@ type Neighbor struct {
 
 // Table struct that contains the routing table, slice leaders table, unit leaders table and supernodes table.
 type Table struct {
-	rt   RoutingTable // routing table of the node
-	ul   RoutingTable // unit leaders table of the node
-	sl   RoutingTable // slice leaders table of the node
-	sn   RoutingTable // supernodes table of the node
-	pred Neighbor     // entry pointer to the predecessor node
-	succ Neighbor     // entry pointer to the successor node
+	rt   RoutingTable  // routing table of the node
+	ul   RoutingTable  // unit leaders table of the node
+	sl   RoutingTable  // slice leaders table of the node
+	sn   RoutingTable  // supernodes table of the node
+	pred Neighbor      // entry pointer to the predecessor node
+	succ Neighbor      // entry pointer to the successor node
+	self *RoutingEntry // entry pointer to the self node (the node itself)
 }
 
 // TransportEntry is the rappresentation of a entry for exchange information between nodes in the DHT.
@@ -184,6 +190,37 @@ func (rt *RoutingTable) FindPredecessor(id ID) (*RoutingEntry, error) {
 		return rt.entries[len(rt.entries)-1], nil // Warp around case, if the index is 0, we return the last entry as the predecessor
 	}
 	return rt.entries[idx-1], nil // return the entry at index - 1 as the predecessor
+}
+
+// FindPredecessor finds the predecessor of a given ID in the rt in the Table
+func (t *Table) FindPredecessor(id ID) (*RoutingEntry, error) {
+	return t.rt.FindPredecessor(id)
+}
+
+// FindSuccessor finds the successor of a given ID in the rt in the Table
+func (t *Table) FindSuccessor(id ID) (*RoutingEntry, error) {
+	return t.rt.FindSuccessor(id)
+}
+
+// IsSupernode find if the given ID is a supernode in the Supernodes Table. It returns true if it is, otherwise false.
+func (t *Table) IsSupernode(id ID) bool {
+	// control parameters
+	if id == (ID{}) {
+		return false // if the ID is empty, we return false
+	}
+	// lock the read mutex on the supernodes table
+	t.sn.mu.RLock()
+	defer t.sn.mu.RUnlock() // unlock the table at the end of the reading
+	// find the entry in the supernodes table
+	_, err := t.sn.findEntry(id)
+	if err != nil {
+		if errors.Is(err, ErrEntryNotFound) {
+			return false // if the entry is not found, we return false
+		}
+		logger.Log.Errorf("failed to find supernode: %v", err) // log the error if something went wrong
+		return false
+	}
+	return true // return true if the entry is found in the supernodes table
 }
 
 // AddEntry adds a new node in the Table if it does not already exist, otherwise returns an error. It maintains the order of entries based on their IDs.
@@ -482,6 +519,84 @@ func (t *Table) GetNumberOfEntries() int {
 	return len(t.rt.entries) // return the number of entries in the routing table
 }
 
+// IterateRoutingTableChunks itera la routing table a blocchi di chunkSize.
+// Per ogni blocco chiama la callback fornita. Se la callback restituisce false, si interrompe.
+func (t *Table) IterateRoutingTableChunks(callback func([]TransportEntry) bool) error {
+	// Lock delle tabelle
+	t.rt.mu.RLock()
+	t.ul.mu.RLock()
+	t.sl.mu.RLock()
+	t.sn.mu.RLock()
+	defer t.rt.mu.RUnlock()
+	defer t.ul.mu.RUnlock()
+	defer t.sl.mu.RUnlock()
+	defer t.sn.mu.RUnlock()
+	total := len(t.rt.entries)
+	for start := 0; start < total; start += RTChunkSize {
+		end := start + RTChunkSize - 1
+		if end >= total {
+			end = total - 1
+		}
+		entries, err := t.getSliceChunkLocked(start, end)
+		if err != nil {
+			return err
+		}
+		if proceed := callback(entries); !proceed {
+			break
+		}
+	}
+	return nil
+}
+
+// getSliceChunkLocked ritorna un chunk della routing table, assumendo che i lock siano stati già presi.
+func (t *Table) getSliceChunkLocked(start, end int) ([]TransportEntry, error) {
+	if start < 0 || start > end || end >= len(t.rt.entries) {
+		return nil, ErrInvalidRange
+	}
+	transportEntries := make([]TransportEntry, 0, end-start+1)
+	// Trova l'indice iniziale nei leader
+	_, ulIdx, err := t.ul.binarySearchLittleMore(t.rt.entries[start].ID, 0, len(t.ul.entries)-1)
+	if err != nil && !errors.Is(err, ErrWarpAround) {
+		return nil, err
+	}
+	if errors.Is(err, ErrWarpAround) {
+		ulIdx = len(t.ul.entries)
+	}
+	_, slIdx, err := t.sl.binarySearchLittleMore(t.rt.entries[start].ID, 0, len(t.sl.entries)-1)
+	if err != nil && !errors.Is(err, ErrWarpAround) {
+		return nil, err
+	}
+	if errors.Is(err, ErrWarpAround) {
+		slIdx = len(t.sl.entries)
+	}
+	_, snIdx, err := t.sn.binarySearchLittleMore(t.rt.entries[start].ID, 0, len(t.sn.entries)-1)
+	if err != nil && !errors.Is(err, ErrWarpAround) {
+		return nil, err
+	}
+	if errors.Is(err, ErrWarpAround) {
+		snIdx = len(t.sn.entries)
+	}
+
+	for i := start; i <= end; i++ {
+		entry := t.rt.entries[i]
+		isSupernode := snIdx < len(t.sn.entries) && t.sn.entries[snIdx].ID.Equals(entry.ID)
+		if isSupernode {
+			snIdx++
+		}
+		isSliceLeader := slIdx < len(t.sl.entries) && t.sl.entries[slIdx].ID.Equals(entry.ID)
+		if isSliceLeader {
+			slIdx++
+		}
+		isUnitLeader := ulIdx < len(t.ul.entries) && t.ul.entries[ulIdx].ID.Equals(entry.ID)
+		if isUnitLeader {
+			ulIdx++
+		}
+		transportEntry := entry.convertToTransportEntry(isSupernode, isSliceLeader, isUnitLeader)
+		transportEntries = append(transportEntries, transportEntry)
+	}
+	return transportEntries, nil
+}
+
 // GetSliceTransportEntries returns a slice of TransportEntry for all entries in the Slice Leaders Table.
 func (t *Table) GetSliceTransportEntries(start, end int) ([]TransportEntry, error) {
 	// control parameters
@@ -564,7 +679,7 @@ func (t *Table) GetSliceTransportEntries(start, end int) ([]TransportEntry, erro
 }
 
 // AddTransportEntry adds a TransportEntry to the Table, converting it to a RoutingEntry and adding it to the appropriate routing tables.
-func (t *Table) AddTransportEntry(te TransportEntry, K int, U int) error {
+func (t *Table) AddTransportEntry(te TransportEntry) error {
 	// add the entry to the routing table
 	err := t.AddEntry(te.Id, te.Address, te.IsSupernode, te.IsUnitLeader, te.IsSliceLeader)
 	if err != nil {
@@ -574,58 +689,60 @@ func (t *Table) AddTransportEntry(te TransportEntry, K int, U int) error {
 }
 
 // ChangePredecessor changes the predecessor of the node to the given RoutingEntry. It returns an error if the entry is invalid or if the predecessor have id > of the new id. (Thread-safe)
-func (t *Table) ChangePredecessor(id ID) (string, error) {
+func (t *Table) ChangePredecessor(id ID) (*RoutingEntry, error) {
 	// control parameters
 	if id == (ID{}) {
-		return "", ErrEmptyID // if the ID is empty, we return an error
+		return nil, ErrEmptyID // if the ID is empty, we return an error
 	}
 	// find the entry in the routing table
 	t.rt.mu.RLock()
 	entry, err := t.rt.findEntry(id)
 	if err != nil {
-		return "", err // return ErrEntryNotFound if the entry is not found
+		return nil, err // return ErrEntryNotFound if the entry is not found
 	}
 	// lock in write
 	t.pred.mu.Lock()
 	t.rt.mu.RUnlock()
 	defer t.pred.mu.Unlock()
 	// check if the entry have id > old predecessor
-	if t.pred.entry == nil || t.pred.entry.ID.LessThan(id) {
+	if t.pred.entry == nil || id.IsOwnedBy(t.pred.entry.ID, t.self.ID) {
 		// if the predecessor entry is nil or the new entry ID is greater than the predecessor entry ID, we change the predecessor entry
+		oldPred := t.pred.entry // save the old predecessor address
 		t.pred.entry = entry    // change the predecessor entry to the new entry
 		t.pred.UpdateLastSeen() // update the last seen time of the predecessor
-		return "", nil          // return the old predecessor address
+		return oldPred, nil     // return the old predecessor address
 	} else {
 		// if the predecessor entry already exists and is greater than the new entry, we return the address of the old predecessor
-		return t.pred.entry.Address, ErrPredRedirect // return the address of the old predecessor
+		return t.pred.entry, ErrPredRedirect // return the address of the old predecessor
 	}
 }
 
-// ChangeSuccessor changes the successor of the node to the given RoutingEntry. It returns an error if the entry is invalid or if the successor have id < of the new id. (Thread-safe)
-func (t *Table) ChangeSuccessor(id ID) (string, error) {
+// ChangeSuccessor changes the successor of the node to the given RoutingEntry. It returns an error if the entry is invalid or if the successor have id > of the new id || id < myID. (Thread-safe)
+func (t *Table) ChangeSuccessor(id ID) (*RoutingEntry, error) {
 	// control parameters
 	if id == (ID{}) {
-		return "", ErrEmptyID // if the ID is empty, we return an error
+		return nil, ErrEmptyID // if the ID is empty, we return an error
 	}
 	// find the entry in the routing table
 	t.rt.mu.RLock()
 	entry, err := t.rt.findEntry(id)
 	if err != nil {
-		return "", err // return ErrEntryNotFound if the entry is not found
+		return nil, err // return ErrEntryNotFound if the entry is not found
 	}
 	// lock in write
 	t.succ.mu.Lock()
 	t.rt.mu.RUnlock()
 	defer t.succ.mu.Unlock()
-	// check if the entry have id < old successor
-	if t.succ.entry == nil || id.LessThan(t.succ.entry.ID) {
-		// if the successor entry is nil or the new entry ID is less than the successor entry ID, we change the successor entry
+	// check if hte entry is between myID and the old successor entry ID
+	if t.succ.entry == nil || id.IsOwnedBy(t.self.ID, t.succ.entry.ID) {
+		// if the successor entry is nil or the new entry ID is between me and the successor entry ID, we change the successor entry
+		oldSucc := t.succ.entry // save the old successor address
 		t.succ.entry = entry    // change the successor entry to the new entry
 		t.succ.UpdateLastSeen() // update the last seen time of the successor
-		return "", nil          // return the old successor address
+		return oldSucc, nil     // return the old successor address
 	} else {
 		// if the successor entry already exists and is less than the new entry, we return the address of the old successor
-		return t.succ.entry.Address, ErrSuccRedirect // return the address of the old successor
+		return t.succ.entry, ErrSuccRedirect // return the address of the old successor
 	}
 }
 

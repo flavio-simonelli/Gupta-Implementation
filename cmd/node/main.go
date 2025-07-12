@@ -21,9 +21,12 @@ func main() {
 		logger.Log.WithError(err).Fatal("Error loading configuration")
 		return
 	}
-	// inizializza le varibaili globali in ID.go che sono U e K
-	dht.K = loadConfig.DHT.K
-	dht.U = loadConfig.DHT.U
+	// initialize the global parameters for the DHT
+	err = dht.InitializeIDParameters(loadConfig.DHT.K, loadConfig.DHT.U)
+	if err != nil {
+		logger.Log.WithError(err).Fatal("Error initializing DHT parameters")
+		return
+	}
 	// get listener address and port
 	listener, err := transport.GetListener(loadConfig.Node.IP, loadConfig.Node.Port)
 	if err != nil {
@@ -39,30 +42,42 @@ func main() {
 	}
 	logger.Log.Infof("Create a client connection pool with max size: %d", loadConfig.Node.MaxConnectionsClient)
 	// initialize the storage for the node
-	store, _, err := dht.NewNodeStorage(loadConfig.Node.MainStorage) //TODO: gestire i file entries
-	if err != nil {
-		logger.Log.WithError(err).Fatal("Error creating node storage")
-		return
-	}
+	mainStore := dht.NewStorage(loadConfig.Node.MainStorage, loadConfig.DHT.ChunkSize) //TODO: gestire i file entries
 	logger.Log.Infof("Initialized node storage at: %s", loadConfig.Node.MainStorage)
-	// create a new node with the configuration
-	node, err := dht.NewNode(loadConfig.Node.ID, listener.Addr().String(), client, loadConfig.Node.Supernode, store)
+	// initialize the storage backup for the predecessor node
+	predecessorStore := dht.NewStorage(loadConfig.Node.PredecessorStorage, loadConfig.DHT.ChunkSize)
+	logger.Log.Infof("Initialized predecessor backup storage at: %s", loadConfig.Node.PredecessorStorage)
+	// initializate the event boards for the node
+	normalBoard := dht.NewNormalBoard(loadConfig.DHT.RetryInterval)
+	logger.Log.Infof("Initialized normal event board with retry interval: %s", loadConfig.DHT.RetryInterval)
+	// create the id of the node from the configuration file or ip:port if not provided
+	id, err := dht.IDFromHexString(loadConfig.Node.ID)
 	if err != nil {
-		logger.Log.WithError(err).Fatal("Error creating DHT node struct")
-		return
+		if err == dht.ErrEmptyHexString {
+			// Generate a new ID if the provided hex string is empty
+			id = dht.GenerateID(loadConfig.Node.IP, loadConfig.Node.Port)
+			logger.Log.Warnf("Provided ID is empty, generated new ID: %s", id.ToHexString())
+		} else {
+			logger.Log.WithError(err).Fatal("Error creating node ID from hex string")
+			return
+		}
 	}
+	// create a new node with the configuration
+	node := dht.NewNode(id, loadConfig.Node.IP, loadConfig.Node.Port, loadConfig.Node.Supernode, client, mainStore, predecessorStore, normalBoard)
+	logger.Log.Infof("Create a new struct Node")
 	// save the new configuration node in the configuration file
 	err = config.SaveNodeInfo(DefaultConfigFile, node.ID.ToHexString(), node.Addr)
 	if err != nil {
 		logger.Log.WithError(err).Errorf("Error saving node info but continuing")
 	}
 	// join the DHT network if a bootstrap node is provided or create a new one
-	err = node.Join(loadConfig.DHT.BootstrapNode)
-	if err != nil {
-		logger.Log.WithError(err).Fatal("Error joining DHT network")
-		return
+	if loadConfig.DHT.BootstrapNode == "" {
+		logger.Log.Info("No bootstrap node provided, creating a new DHT network")
+		// create a new DHT network
+	} else {
+		logger.Log.Infof("Joining an existing DHT network using bootstrap node: %s", loadConfig.DHT.BootstrapNode)
+		// join an existing DHT network
 	}
-	logger.Log.Infof("The DHT node is joined successfully")
 	// run the gRPC server
 	err = transport.RunServer(node, listener)
 	if err != nil {

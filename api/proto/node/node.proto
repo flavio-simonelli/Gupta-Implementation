@@ -25,7 +25,7 @@ message Entry {
 
 // ----- Info di redirect da inserire in google.rpc.Status.details -----
 message RedirectInfo {
-  string target = 1;      // Node to which the request should be redirected
+  NodeInfo target = 1;      // Node to which the request should be redirected
 }
 
 // ----- message dissemination -----
@@ -35,8 +35,12 @@ enum EventType {
 }
 
 message Event {
-  Entry entry = 1;
-  EventType event_type = 2; // Type of event (JOIN, LEAVE_NORMAL, LEAVE_UNITLEADER, LEAVE_SLICELEADER)
+  NodeInfo target = 1;
+  EventType event_type = 2; // Type of event (JOIN, LEAVE)
+}
+
+message EventChunk {
+  repeated Event events = 1; // List of events to be disseminated
 }
 
 // ----- Resource -----
@@ -65,7 +69,7 @@ message RoutingTableChunk {
 }
 
 // ----- Join Request -----
-message FindSuccessorResponse {
+message FindPredecessorResponse {
   string address = 1; // address of the node in the format "ip:port"
 }
 message BecomePredecessorRequest {
@@ -102,18 +106,19 @@ message LookupRequest {
 
 service JoinService {
   // the id node is in the request header
-  rpc FindSuccessor(google.protobuf.Empty)
-      returns (FindSuccessorResponse);
-
-  // if the node isn't the successor of the target node:
-  //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realSuccessor}
-  rpc BecomePredecessor(BecomePredecessorRequest)
-      returns (stream BecomePredecessorResponse);
+  rpc FindPredecessor(google.protobuf.Empty)
+      returns (NodeInfo);
 
   // if the node isn't the predecessor of the target node:
   //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realPredecessor}
   rpc BecomeSuccessor(BecomeSuccessorRequest)
-      returns (google.protobuf.Empty);
+      returns (NodeInfo);
+
+  // if the node isn't the successor of the target node:
+  //   → codes.FAILED_PRECONDITION + RedirectInfo{target=realSuccessor}
+  rpc BecomePredecessor(NodeInfo)
+    returns (stream BecomePredecessorResponse);
+
 
 }
 
@@ -138,6 +143,9 @@ service StorageService {
 }
 
 service DisseminationService {
-  rpc Notify(stream Event) returns (google.protobuf.Empty);
+  rpc FlowNotify(stream EventChunk) returns (google.protobuf.Empty);
+  rpc SLNotify(stream EventChunk) returns (google.protobuf.Empty);
+  rpc BecomeSL(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc BecomeUL(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
 

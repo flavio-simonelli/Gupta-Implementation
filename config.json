@@ -3,15 +3,20 @@
     "id": "3b6e24cb886a6f947df652cb72b30cac",
     "ip": "192.168.1.107",
     "port": 37863,
-    "main_storage": "/home/flavio/dht_storage2",
+    "main_storage": "/home/flavio/.dht_storage",
     "predecessor_storage": "/home/flavio/.dht_predecessor",
-    "successor_storage": "/home/flavio/.dht_successor",
     "max_connections_client": 10,
     "supernode": true
   },
   "dht": {
     "K": 16,
     "U": 20,
-    "bootstrap_node": "192.168.1.107:44969"
+    "bootstrap_node": "192.168.1.107:44969",
+    "timeKeepAlive": 10000,
+    "tBig": 10000,
+    "tWait": 1000,
+    "retryInterval": 5000,
+    "fileChunkSize": 1024,
+    "routingTableChunkSize": 50
   }
 }

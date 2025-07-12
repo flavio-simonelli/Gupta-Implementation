@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 // error set
@@ -25,16 +26,20 @@ type NodeConfig struct {
 	Port                 int    `json:"port"`
 	MainStorage          string `json:"main_storage"`
 	PredecessorStorage   string `json:"predecessor_storage"`
-	SuccessorStorage     string `json:"successor_storage"`
 	MaxConnectionsClient int    `json:"max_connections_client"`
 	Supernode            bool   `json:"supernode"` // true if this node is a supernode
 }
 
 // DHT‑level sub‑config
 type DHTConfig struct {
-	K             int    `json:"K"`
-	U             int    `json:"U"`
-	BootstrapNode string `json:"bootstrap_node"`
+	K             int           `json:"K"`
+	U             int           `json:"U"`
+	BootstrapNode string        `json:"bootstrap_node"`
+	TimeKA        time.Duration `json:"timeKeepAlive"` // Time to wait before sending the K events to the slice leaders
+	TBig          time.Duration `json:"tBig"`          // Time to wait before sending the events to the slice leaders
+	TWait         time.Duration `json:"tWait"`         // Time to wait before retrying to send the events to the unit leaders
+	RetryInterval time.Duration `json:"retryInterval"` // Time to wait before retrying to send the events to the slice leaders
+	ChunkSize     int           `json:"chunkSize"`     // Size of each chunk in bytes for file transfers
 }
 
 // Config is the root object that mirrors the JSON structure.
@@ -79,7 +84,6 @@ func LoadConfig(filePath string) (Config, error) {
 	// Espansione percorsi che contengono ~ o $HOME
 	cfg.Node.MainStorage = expandHome(cfg.Node.MainStorage)
 	cfg.Node.PredecessorStorage = expandHome(cfg.Node.PredecessorStorage)
-	cfg.Node.SuccessorStorage = expandHome(cfg.Node.SuccessorStorage)
 
 	return cfg, nil
 }
