@@ -1,4 +1,4 @@
-package dht
+package id
 
 import (
 	"crypto/md5"
@@ -32,6 +32,46 @@ var (
 
 // ID represents a unique identifier in the DHT network.
 type ID [16]byte
+
+// ---- Initialization of ID Parameters -----
+
+// computeSizes calculates the slice and unit sizes based on the total number of IDs (2^128).
+func computeSizes() (sliceSz, unitSz *big.Int) {
+	kBig := big.NewInt(int64(k))
+	uBig := big.NewInt(int64(u))
+
+	sliceSz = new(big.Int).Div(totalIDs, kBig)
+	unitSz = new(big.Int).Div(sliceSz, uBig)
+	return sliceSz, unitSz
+}
+
+// InitializeIDParameters initializes the global parameters for id package.
+func InitializeIDParameters(kVal, uVal int) error {
+	if kVal <= 0 {
+		return ErrInvalidK
+	}
+	if uVal <= 0 {
+		return ErrInvalidU
+	}
+	k = kVal
+	u = uVal
+	sliceSz, unitSz = computeSizes()
+	return nil
+}
+
+// GetK returns the number of slices in the DHT network.
+func GetK() int { return k }
+
+// GetU returns the number of units per slice in the DHT network.
+func GetU() int {
+	return u
+}
+
+// GetSliceSize returns the size of each slice in the DHT network.
+func GetSliceSize() *big.Int { return sliceSz }
+
+// GetUnitSize returns the size of each unit in the DHT network.
+func GetUnitSize() *big.Int { return unitSz }
 
 // ----- ID creation and conversion -----
 
@@ -156,22 +196,6 @@ func (id ID) Prev() ID {
 
 // ---- Manipulation for slice and Unit Calculation ----
 
-// computeSizes calculates the slice and unit sizes based on the total number of IDs (2^128).
-func ComputeSizes() (sliceSz, unitSz *big.Int, err error) {
-	if k <= 0 {
-		return nil, nil, ErrInvalidK
-	}
-	if u <= 0 {
-		return nil, nil, ErrInvalidU
-	}
-	kBig := big.NewInt(int64(k))
-	uBig := big.NewInt(int64(u))
-
-	sliceSz = new(big.Int).Div(totalIDs, kBig)
-	unitSz = new(big.Int).Div(sliceSz, uBig)
-	return sliceSz, unitSz, nil
-}
-
 // SliceAndUnit returns (slice, unit) in [0,...,K-1]*[0,...,U-1] for the given ID, where K and U are plain int.
 // The mapping is uniform except that the last slice/unit may be larger when 2^128 is not divisible by K·U.
 func (id ID) SliceAndUnit() (int, int) {
@@ -220,36 +244,4 @@ func (id ID) SameUnit(other ID) bool {
 	s1, u1 := id.SliceAndUnit()
 	s2, u2 := other.SliceAndUnit()
 	return s1 == s2 && u1 == u2
-}
-
-// ---- Initialization of ID Parameters -----
-
-// InitializeIDParameters initializes the global parameters for the DHT network.
-func InitializeIDParameters(kVal, uVal int) error {
-	if kVal <= 0 {
-		return ErrInvalidK
-	}
-	if uVal <= 0 {
-		return ErrInvalidU
-	}
-	k = kVal
-	u = uVal
-
-	var err error
-	sliceSz, unitSz, err = ComputeSizes()
-	if err != nil {
-		return fmt.Errorf("error computing slice and unit sizes: %w", err)
-	}
-
-	return nil
-}
-
-// GetK returns the number of slices in the DHT network.
-func GetK() int {
-	return k
-}
-
-// GetU returns the number of units per slice in the DHT network.
-func GetU() int {
-	return u
 }
