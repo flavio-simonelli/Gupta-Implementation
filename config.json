@@ -1,8 +1,8 @@
 {
   "node": {
-    "id": "3b6e24cb886a6f947df652cb72b30cac",
+    "id": "211e626aed39717617b6856706358242",
     "ip": "192.168.1.107",
-    "port": 37863,
+    "port": 0,
     "main_storage": "/home/flavio/.dht_storage",
     "predecessor_storage": "/home/flavio/.dht_predecessor",
     "max_connections_client": 10,
@@ -11,12 +11,13 @@
   "dht": {
     "K": 16,
     "U": 20,
-    "bootstrap_node": "192.168.1.107:44969",
-    "timeKeepAlive": 10000,
-    "tBig": 10000,
-    "tWait": 1000,
-    "retryInterval": 5000,
-    "fileChunkSize": 1024,
-    "routingTableChunkSize": 50
+    "bootstrap_node": "",
+    "time_keep_alive": 10000,
+    "t_big": 10000,
+    "t_wait": 1000,
+    "time_retry_send": 5000,
+    "chunk_file_size": 1024,
+    "chunk_event_size": 10,
+    "chunk_routing_table_size": 20
   }
 }
