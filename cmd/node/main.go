@@ -2,8 +2,11 @@ package main
 
 import (
 	"GuptaDHT/internal/config"
-	"GuptaDHT/internal/dht"
+	"GuptaDHT/internal/dht/event"
+	"GuptaDHT/internal/dht/id"
+	"GuptaDHT/internal/dht/storage"
 	"GuptaDHT/internal/logger"
+	"GuptaDHT/internal/node"
 	transport "GuptaDHT/internal/transport/grpc"
 )
 
@@ -14,15 +17,22 @@ const (
 func main() {
 	// Initialize logger
 	logger.Init("info")
-	// read configuration from config file
-	logger.Log.Infof("Loading configuration from %s", DefaultConfigFile)
+	// read configuration from the config file
 	loadConfig, err := config.LoadConfig(DefaultConfigFile)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error loading configuration")
-		return
 	}
+	logger.Log.Infof("Loaded configuration from %s", DefaultConfigFile)
+	// Initialize all the components of the DHT node
+	// initialize id parameters
+	err = id.InitializeIDParameters(loadConfig.DHT.K, loadConfig.DHT.U)
+	if err != nil {
+		logger.Log.WithError(err).Fatal("Error initializing ID (K, U) parameters")
+	}
+	// initialize a new Node
+
 	// initialize the global parameters for the DHT
-	err = dht.InitializeIDParameters(loadConfig.DHT.K, loadConfig.DHT.U)
+	err = id.InitializeIDParameters(loadConfig.DHT.K, loadConfig.DHT.U)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error initializing DHT parameters")
 		return
@@ -42,20 +52,20 @@ func main() {
 	}
 	logger.Log.Infof("Create a client connection pool with max size: %d", loadConfig.Node.MaxConnectionsClient)
 	// initialize the storage for the node
-	mainStore := dht.NewStorage(loadConfig.Node.MainStorage, loadConfig.DHT.ChunkSize) //TODO: gestire i file entries
+	mainStore := storage.NewStorage(loadConfig.Node.MainStorage, loadConfig.DHT.ChunkSize) //TODO: gestire i file entries
 	logger.Log.Infof("Initialized node storage at: %s", loadConfig.Node.MainStorage)
 	// initialize the storage backup for the predecessor node
-	predecessorStore := dht.NewStorage(loadConfig.Node.PredecessorStorage, loadConfig.DHT.ChunkSize)
+	predecessorStore := storage.NewStorage(loadConfig.Node.PredecessorStorage, loadConfig.DHT.ChunkSize)
 	logger.Log.Infof("Initialized predecessor backup storage at: %s", loadConfig.Node.PredecessorStorage)
 	// initializate the event boards for the node
-	normalBoard := dht.NewNormalBoard(loadConfig.DHT.RetryInterval)
+	normalBoard := event.NewEventDispatcher()
 	logger.Log.Infof("Initialized normal event board with retry interval: %s", loadConfig.DHT.RetryInterval)
 	// create the id of the node from the configuration file or ip:port if not provided
-	id, err := dht.IDFromHexString(loadConfig.Node.ID)
+	id, err := id.IDFromHexString(loadConfig.Node.ID)
 	if err != nil {
-		if err == dht.ErrEmptyHexString {
+		if err == id.ErrEmptyHexString {
 			// Generate a new ID if the provided hex string is empty
-			id = dht.GenerateID(loadConfig.Node.IP, loadConfig.Node.Port)
+			id = id.GenerateID(loadConfig.Node.IP, loadConfig.Node.Port)
 			logger.Log.Warnf("Provided ID is empty, generated new ID: %s", id.ToHexString())
 		} else {
 			logger.Log.WithError(err).Fatal("Error creating node ID from hex string")
@@ -63,7 +73,7 @@ func main() {
 		}
 	}
 	// create a new node with the configuration
-	node := dht.NewNode(id, loadConfig.Node.IP, loadConfig.Node.Port, loadConfig.Node.Supernode, client, mainStore, predecessorStore, normalBoard)
+	node := node.NewNode(id, loadConfig.Node.IP, loadConfig.Node.Port, loadConfig.Node.Supernode, client, mainStore, predecessorStore, normalBoard)
 	logger.Log.Infof("Create a new struct Node")
 	// save the new configuration node in the configuration file
 	err = config.SaveNodeInfo(DefaultConfigFile, node.ID.ToHexString(), node.Addr)
@@ -73,10 +83,16 @@ func main() {
 	// join the DHT network if a bootstrap node is provided or create a new one
 	if loadConfig.DHT.BootstrapNode == "" {
 		logger.Log.Info("No bootstrap node provided, creating a new DHT network")
-		// create a new DHT network
+		err := node.CreateDHT()
+		if err != nil {
+			return
+		}
 	} else {
 		logger.Log.Infof("Joining an existing DHT network using bootstrap node: %s", loadConfig.DHT.BootstrapNode)
-		// join an existing DHT network
+		err := node.Join(loadConfig.DHT.BootstrapNode)
+		if err != nil {
+			return
+		}
 	}
 	// run the gRPC server
 	err = transport.RunServer(node, listener)

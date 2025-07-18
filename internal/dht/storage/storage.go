@@ -1,6 +1,7 @@
-package dht
+package storage
 
 import (
+	"GuptaDHT/internal/dht/id"
 	"errors"
 	"fmt"
 	"io"
@@ -29,7 +30,7 @@ type MetadataResource struct {
 
 // Storage provides a simple file-based storage for DHT nodes.
 type Storage struct {
-	infoData map[ID]*MetadataResource
+	infoData map[id.ID]*MetadataResource
 	dir      string
 	mu       sync.RWMutex // Mutex to protect access at the map of resources
 }
@@ -40,7 +41,7 @@ type Storage struct {
 func NewStorage(dir string, chunkSize int) *Storage {
 	FileChunkSize = chunkSize // Set the global chunk size
 	return &Storage{
-		infoData: make(map[ID]*MetadataResource),
+		infoData: make(map[id.ID]*MetadataResource),
 		dir:      dir,
 	}
 }
@@ -58,7 +59,7 @@ func (s *Storage) CreateFile(filename string) (*os.File, error) {
 //TODO: gestire caso in cui il file esiste già
 
 // SaveMetadata saves the metadata of a resource in the storage.
-func (s *Storage) SaveMetadata(id ID, filename string, size uint64) {
+func (s *Storage) SaveMetadata(id id.ID, filename string, size uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -73,7 +74,7 @@ func (s *Storage) SaveMetadata(id ID, filename string, size uint64) {
 }
 
 // GetMetadata retrieves the metadata of a resource by its ID.
-func (s *Storage) GetMetadata(id ID) (*MetadataResource, bool) {
+func (s *Storage) GetMetadata(id id.ID) (*MetadataResource, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -85,7 +86,7 @@ func (s *Storage) GetMetadata(id ID) (*MetadataResource, bool) {
 }
 
 // OpenFile opens a file in the storage by its ID and returns the file handle. (attention the file is read locked if error is nil)
-func (s *Storage) OpenFile(id ID) (*os.File, error) {
+func (s *Storage) OpenFile(id id.ID) (*os.File, error) {
 	metadata, exist := s.GetMetadata(id)
 	if exist != true {
 		return nil, ErrResourceNotFound
@@ -115,7 +116,7 @@ func (s *Storage) CloseFile(file *os.File, resource *MetadataResource) error {
 }
 
 // DeleteFile deletes a file from the storage by its ID and removes its metadata.
-func (s *Storage) DeleteFile(id ID) error {
+func (s *Storage) DeleteFile(id id.ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -168,11 +169,11 @@ func ReadChunkFile(file *os.File, maxBytes int) ([]byte, error) {
 // Se si sta creando il file dobbiamo anche alla fine salvare i metadati con SaveMetadata, in modo da poter recuperare il file in seguito. Se si vuole leggere il file, si usa OpenFile per ottenere il file handle e poi si legge il chunk con ReadChunkFile. Alla fine si chiude il file con CloseFile.
 
 // ListStoredIDs returns a slice of all IDs currently stored.
-func (s *Storage) ListStoredIDs() []ID {
+func (s *Storage) ListStoredIDs() []id.ID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ids := make([]ID, 0, len(s.infoData))
+	ids := make([]id.ID, 0, len(s.infoData))
 	for id := range s.infoData {
 		ids = append(ids, id)
 	}

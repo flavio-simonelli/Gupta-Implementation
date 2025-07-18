@@ -2,8 +2,11 @@ package grpc
 
 import (
 	pb "GuptaDHT/api/gen/node"
-	"GuptaDHT/internal/dht"
+	"GuptaDHT/internal/dht/id"
+	"GuptaDHT/internal/dht/routingtable"
+	"GuptaDHT/internal/dht/storage"
 	"GuptaDHT/internal/logger"
+	"GuptaDHT/internal/node"
 	"context"
 	"errors"
 	"fmt"
@@ -25,7 +28,7 @@ var (
 )
 
 type Server struct {
-	node *dht.Node
+	node *node.Node
 	pb.UnimplementedDisseminationServiceServer
 	pb.UnimplementedStorageServiceServer
 	pb.UnimplementedJoinServiceServer
@@ -33,7 +36,7 @@ type Server struct {
 }
 
 // newServer creates a new gRPC server with the given DHT node
-func newServer(node *dht.Node) *Server {
+func newServer(node *node.Node) *Server {
 	return &Server{
 		node: node,
 	}
@@ -76,7 +79,8 @@ func GetListener(ip string, port int) (net.Listener, error) {
 }
 
 // RunServer starts the gRPC server with the given DHT node and listener
-func RunServer(node *dht.Node, lis net.Listener) error {
+func RunServer(node *node.Node, lis net.Listener) error {
+	logger.Log.Infof("Starting gRPC server for DHT node %s at %s", node.ID.ToHexString(), lis.Addr().String())
 	// check if the node is nil
 	if node == nil {
 		return ErrNilNode
@@ -117,7 +121,7 @@ func (s *Server) FindPredecessor(ctx context.Context, _ *emptypb.Empty) (*pb.Nod
 	}
 	logger.Log.Infof("Received FindPredecessorRequest from: %s", senderIDs[0])
 
-	senderID, err := dht.IDFromHexString(senderIDs[0])
+	senderID, err := id.IDFromHexString(senderIDs[0])
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid sender-id: %v", err)
 	}
@@ -151,7 +155,7 @@ func (s *Server) BecomeSuccessor(ctx context.Context, req *pb.BecomeSuccessorReq
 	logger.Log.Infof("Received BecomePredecessor from: %s", senderIDs[0])
 
 	// Extract the new successor proposed by the request
-	newSuccID, err := dht.IDFromHexString(req.GetNewSuccessor().Node.NodeId)
+	newSuccID, err := id.IDFromHexString(req.GetNewSuccessor().Node.NodeId)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
 	}
@@ -165,7 +169,7 @@ func (s *Server) BecomeSuccessor(ctx context.Context, req *pb.BecomeSuccessorReq
 	// Change the successor to the new node
 	oldSucc, err := s.node.T.ChangeSuccessor(newSuccID)
 	if err != nil {
-		if errors.Is(err, dht.ErrSuccRedirect) {
+		if errors.Is(err, routingtable.ErrSuccRedirect) {
 			// Redirect to the current successor if the new ID is not valid
 			logger.Log.Warnf("Redirecting to current successor: %v", oldSucc)
 			st := status.New(codes.FailedPrecondition, "not the real successor")
@@ -203,13 +207,13 @@ func (s *Server) BecomeSuccessor(ctx context.Context, req *pb.BecomeSuccessorReq
 
 func (s *Server) BecomePredecessor(req *pb.NodeInfo, stream pb.JoinService_BecomePredecessorServer) error {
 	// Log the request for debugging purposes
-	metadataID, err := dht.IDFromHexString(req.Node.NodeId)
+	metadataID, err := id.IDFromHexString(req.Node.NodeId)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid metadata node ID: %v", err)
 	}
 	logger.Log.Infof("Received BecomePredecessorRequest for node ID: %s", metadataID.ToHexString())
 	// Get the information request
-	newPredID, err := dht.IDFromHexString(req.Node.NodeId)
+	newPredID, err := id.IDFromHexString(req.Node.NodeId)
 	if err != nil {
 		return status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
 	}
@@ -223,7 +227,7 @@ func (s *Server) BecomePredecessor(req *pb.NodeInfo, stream pb.JoinService_Becom
 	// change predecessor
 	oldPred, err := s.node.T.ChangePredecessor(newPredID)
 	if err != nil {
-		if errors.Is(err, dht.ErrPredRedirect) {
+		if errors.Is(err, routingtable.ErrPredRedirect) {
 			// Redirect to the current predecessor if the new ID is not valid
 			logger.Log.Warnf("Redirecting to current predecessor: %v", oldPred)
 			st := status.New(codes.FailedPrecondition, "not the real predecessor")
@@ -246,7 +250,7 @@ func (s *Server) BecomePredecessor(req *pb.NodeInfo, stream pb.JoinService_Becom
 	}
 	logger.Log.Infof("Changed predecessor to %s for node ID %s", newPredAddr, newPredID.ToHexString())
 	// send the routing table entries in chunks to the new predecessor
-	err = s.node.T.IterateRoutingTableChunks(func(entries []dht.TransportEntry) bool {
+	err = s.node.T.IterateRoutingTableChunks(func(entries []routingtable.TransportEntry) bool {
 		pbEntries := make([]*pb.Entry, 0, len(entries))
 		for _, entry := range entries {
 			pbEntry := &pb.Entry{
@@ -312,11 +316,11 @@ func (s *Server) BecomePredecessor(req *pb.NodeInfo, stream pb.JoinService_Becom
 
 		offset := uint64(0)
 		for {
-			data, err := dht.ReadChunkFile(file, dht.FileChunkSize)
+			data, err := storage.ReadChunkFile(file, storage.FileChunkSize)
 			if err != nil && err != io.EOF {
 				break
 			}
-			eof := len(data) < dht.FileChunkSize || err == io.EOF
+			eof := len(data) < storage.FileChunkSize || err == io.EOF
 
 			// invia chunk
 			err = stream.Send(&pb.BecomePredecessorResponse{
@@ -345,209 +349,3 @@ func (s *Server) BecomePredecessor(req *pb.NodeInfo, stream pb.JoinService_Becom
 	}
 	return nil
 }
-
-/*
-// FindPredecessor handles the gRPC call to find the predecessor of a given node ID and returns the entry of the node predecessor of the given ID
-func (s *Server) FindPredecessor(, req *pb.FindSuccessorRequest) (*pb.FindSuccessorResponse, error) {
-	// get the node ID from the request
-	logger.Log.Infof("Received FindSuccessorRequest %s", req.Id.NodeId)
-	id, err := dht.IDFromHexString(req.Id.NodeId)
-	if err != nil {
-		logger.Log.Warnf("Invalid node ID: %v", err)
-		return nil, status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
-	}
-	// Find the successor for the given ID
-	succ, _, err := s.node.T.FindSuccessor(id)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "error finding successor: %v", err)
-	}
-	logger.Log.Infof("Found successor for ID %s: %s", id.ToHexString(), succ.Address)
-	return &pb.FindSuccessorResponse{
-		Address: &pb.NodeAddress{
-			Address: succ.Address,
-		},
-	}, nil
-}
-
-
-/* Questa funzione di become predecessor nel server quando viene chiamata deve fare questo:
-controlla se il nodo chiamante ha id più grande del vecchio predecessore, se no rstituisce un messaggio di redirect.
-Invia la routing table e le risorse al nodo.
-Mette il nodo nello stato di joining, cioè fa partire una goroutine che attende due condizioni: questo nodo riceve un messaggio di notifica dal nodo in joining, o riceve la notifica da un altro nodo che il nodo ha inviato la notifica allo slicer.
-Allo scadere del tempo la goroutine elimina il nodo e lo rimuove dalla routing table dichiarando che il nodo è morto allo slice leader. (cosi se aveva contattato anche il predecessore se en accorge anche lui)
-
-// BecomePredecessor handles the gRPC call to become a predecessor
-func (s *Server) BecomePredecessor(req *pb.BecomePredecessorRequest, stream pb.JoinService_BecomePredecessorServer) error {
-	logger.Log.Infof("Received BecomePredecessorRequest for node ID: %s", req.Node.NodeId.NodeId)
-	// parse the node ID from the request
-	newId, err := dht.IDFromHexString(req.Node.NodeId.NodeId)
-	if err != nil {
-		logger.Log.Warnf("Invalid node ID: %v", err)
-		return status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
-	}
-	// change the predecessor
-	oldPred, err := s.node.T.ChangePredecessor(newId, req.Node.Address.Address, req.Node.Supernode, s.node.K, s.node.U)
-	if err != nil {
-		if errors.Is(err, dht.ErrPredRedirect) {
-			// Redirect to the successor if the new ID is not greater than the current predecessor
-			logger.Log.Warnf("Redirecting to successor: %v", oldPred)
-			st := status.New(codes.FailedPrecondition, "not the real successor")
-			stWithInfo, err := st.WithDetails(&pb.RedirectInfo{
-				Target: &pb.NodeAddress{
-					Address: oldPred,
-				},
-			})
-			if err != nil {
-				logger.Log.Errorf("Error creating redirect info: %v", err)
-				return status.Errorf(codes.Internal, "error creating redirect info: %v", err)
-			}
-			return stWithInfo.Err()
-		} else {
-			logger.Log.Errorf("Error changing predecessor: %v", err)
-			return status.Errorf(codes.Internal, "error changing predecessor: %v", err)
-		}
-	}
-	// send the routing table entries in chunks
-	logger.Log.Infof("Sending routing table entries to new predecessor: %s", newId.ToHexString())
-	for i := 0; i < s.node.T.LenTable(); i += FileChunkSize {
-		end := i + FileChunkSize
-		if end > s.node.T.LenTable() {
-			end = s.node.T.LenTable()
-		}
-		// Get the entries for the current chunk
-		entries, err := s.node.T.ToTransportEntry(i, end)
-		if err != nil {
-			logger.Log.Errorf("Error getting routing entries chunk: %v", err)
-			return status.Errorf(codes.Internal, "error getting routing entries chunk: %v", err)
-		}
-		logger.Log.Infof("Sending chunk %d to new predecessor with %d entries", i/FileChunkSize+1, len(entries))
-		pbEntries := make([]*pb.Entry, 0, len(entries))
-		for _, entry := range entries {
-			pbEntry := &pb.Entry{
-				NodeId:        entry.Id.ToHexString(),
-				Address:       entry.Address,
-				IsSupernode:   entry.IsSupernode,
-				IsSliceLeader: entry.IsSliceLeader,
-				IsUnitLeader:  entry.IsUnitLeader,
-			}
-			pbEntries = append(pbEntries, pbEntry)
-		}
-		response := &pb.BecomePredecessorResponse{
-			Payload: &pb.BecomePredecessorResponse_RoutingChunk{
-				RoutingChunk: &pb.RoutingTableChunk{
-					Entries: pbEntries,
-				},
-			},
-		}
-		if err := stream.Send(response); err != nil {
-			logger.Log.Errorf("Failed to send routing entries chunk: %v", err)
-			return status.Errorf(codes.Internal, "failed to send routing entries chunk: %v", err)
-		}
-	}
-	// send the resources that the predecessor should take over
-	resToSend, err := s.node.MainStore.ListResources(newId, s.node.ID)
-	if err != nil {
-		logger.Log.Errorf("Error listing resources for new predecessor: %v", err)
-		return status.Errorf(codes.Internal, "error listing resources for new predecessor: %v", err)
-	}
-	for _, res := range resToSend {
-		metadata, err := s.node.MainStore.GetFileInfo(res.Filename)
-		if err != nil {
-			logger.Log.Errorf("Error getting file info for resource %s: %v", res.Filename, err)
-			continue
-		}
-		// create and send the resource metadata
-		meta := &pb.ResourceMetadata{
-			Key:  metadata.ID.ToHexString(),
-			Name: metadata.Filename,
-			Size: metadata.Size,
-		}
-		if err := stream.Send(&pb.BecomePredecessorResponse{
-			Payload: &pb.BecomePredecessorResponse_ResourceMetadata{
-				ResourceMetadata: meta,
-			},
-		}); err != nil {
-			logger.Log.Errorf("Failed to send resource metadata for %s: %v", res.Filename, err)
-			return status.Errorf(codes.Internal, "failed to send resource metadata for %s: %v", res.Filename, err)
-		}
-		// now send the file chunks
-		rc, err := s.node.MainStore.GetStream(res.Filename)
-		if err != nil {
-			return status.Errorf(codes.Internal, "open resource: %v", err)
-		}
-		defer rc.Close()
-
-		buf := make([]byte, FileChunkSize)
-		idx := uint64(0)
-		for {
-			n, rerr := rc.Read(buf)
-			if n > 0 {
-				chunk := &pb.StoreChunk{
-					ResourceKey: res.ID.ToHexString(),
-					Offset:      idx,
-					Data:        buf[:n],
-					Eof:         false, // sovrascrivo dopo
-				}
-				// anticipiamo il last prima di mandare
-				if rerr == io.EOF {
-					chunk.Eof = true
-				}
-				if err := stream.Send(&pb.BecomePredecessorResponse{
-					Payload: &pb.BecomePredecessorResponse_StoreChunk{
-						StoreChunk: chunk,
-					},
-				}); err != nil {
-					rc.Close()
-					return status.Errorf(codes.Internal, "send chunk: %v", err)
-				}
-				idx++
-			}
-			if rerr == io.EOF {
-				break
-			}
-			if rerr != nil {
-				rc.Close()
-				return status.Errorf(codes.Internal, "read: %v", rerr)
-			}
-		}
-	}
-	return nil
-}
-
-// BecomeSuccessor è una funzione che invece semplicemente cambia il successore del nodo server nel nodo chiamante se quest'ultimo ha id più piccolo rispetto al vecchio predecessore altrimenti restituisce redirect info
-// Quando inoltreremo le notidfiche faremo un if che dice se è il predecessore ad iniviarlo invia al successore altrimenti invia al predecessore
-// NotifyPredecessor handles the gRPC call to notify a predecessor
-func (s *Server) NotifyPredecessor(ctx context.Context, req *pb.NotifyPredecessorRequest) (*emptypb.Empty, error) {
-	logger.Log.Infof("Received NotifyPredecessorRequest for node ID: %s", req.NewSuccessor.NodeId.NodeId)
-	// parse the node ID from the request
-	newId, err := dht.IDFromHexString(req.NewSuccessor.NodeId.NodeId)
-	if err != nil {
-		logger.Log.Warnf("Invalid node ID: %v", err)
-		return nil, status.Errorf(codes.InvalidArgument, "invalid node ID: %v", err)
-	}
-	// change the predecessor
-	oldPred, err := s.node.T.ChangeSuccessor(newId, req.NewSuccessor.Address.Address, req.NewSuccessor.Supernode, s.node.K, s.node.U)
-	if err != nil {
-		if errors.Is(err, dht.ErrRedirectSucc) {
-			// Redirect to the successor if the new ID is not greater than the current predecessor
-			logger.Log.Warnf("Redirecting to successor: %v", oldPred)
-			st := status.New(codes.FailedPrecondition, "not the real successor")
-			stWithInfo, err := st.WithDetails(&pb.RedirectInfo{
-				Target: &pb.NodeAddress{
-					Address: oldPred,
-				},
-			})
-			if err != nil {
-				logger.Log.Errorf("Error creating redirect info: %v", err)
-				return nil, status.Errorf(codes.Internal, "error creating redirect info: %v", err)
-			}
-			return nil, stWithInfo.Err()
-		} else {
-			logger.Log.Errorf("Error changing predecessor: %v", err)
-			return nil, status.Errorf(codes.Internal, "error changing predecessor: %v", err)
-		}
-	}
-	logger.Log.Infof("Changed predecessor to %s for node ID %s", req.NewSuccessor.Address.Address, newId.ToHexString())
-	return &emptypb.Empty{}, nil
-}
-*/

@@ -81,9 +81,9 @@ func (ka *KeepAlive) start(ctx context.Context) {
 	for {
 		var waitDuration time.Duration
 		// Get the successor information
-		succID, succAddr, err := ka.table.GetSuccessor()
+		succ, err := ka.table.GetMySuccessor()
 		if err != nil {
-			if errors.Is(err, routingtable.ErrNoSuccessor) {
+			if errors.Is(err, routingtable.ErrNeighborNotFound) {
 				waitDuration = ka.keepAliveInterval // No successor, wait indefinitely
 			}
 		} else {
@@ -95,9 +95,9 @@ func (ka *KeepAlive) start(ctx context.Context) {
 				waitDuration = ka.keepAliveInterval - elapsed
 			} else {
 				// if the elapsed time is greater than the keep-alive interval, send a keep-alive message
-				err := ka.net.SendKeepAlive(succAddr)
+				err := ka.net.SendKeepAlive(succ.Address)
 				if err != nil {
-					logger.Log.Warnf("Successor %s failed to respond to keep-alive message: %v. IMPLEMENT FAILURE", succID.ToHexString(), err)
+					logger.Log.Warnf("Successor %s failed to respond to keep-alive message: %v. IMPLEMENT FAILURE", succ.ID.ToHexString(), err)
 					//TODO: implement the failure handling procedure
 				} else {
 					now := time.Now().UnixNano()

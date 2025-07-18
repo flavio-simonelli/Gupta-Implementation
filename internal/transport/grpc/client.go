@@ -3,8 +3,10 @@ package grpc
 import (
 	_ "GuptaDHT/api/gen/node"
 	pb "GuptaDHT/api/gen/node"
-	"GuptaDHT/internal/dht"
 	_ "GuptaDHT/internal/dht"
+	"GuptaDHT/internal/dht/id"
+	"GuptaDHT/internal/dht/routingtable"
+	"GuptaDHT/internal/dht/storage"
 	"GuptaDHT/internal/logger"
 	_ "GuptaDHT/internal/logger"
 	"context"
@@ -229,11 +231,11 @@ func (p *ConnectionPool) CloseAll(ctx context.Context) error {
 // ----- grpc Handlers for DHT operations -----
 
 // FindPredecessor finds the predecessor of a given ID in the DHT network by contacting the target node, return an error
-func (p *ConnectionPool) FindPredecessor(id dht.ID, target string) (dht.ID, string, bool, error) {
+func (p *ConnectionPool) FindPredecessor(id id.ID, target string) (id.ID, string, bool, error) {
 	logger.Log.Infof("Finding predecessor for ID %s on target %s", id.ToHexString(), target)
 	info, err := p.GetConnection(target)
 	if err != nil {
-		return dht.ID{}, "", false, err
+		return id.ID{}, "", false, err
 	}
 	defer info.release() // ensure the connection is released after use
 	// create a gRPC client for the FindSuccessor method
@@ -254,30 +256,30 @@ func (p *ConnectionPool) FindPredecessor(id dht.ID, target string) (dht.ID, stri
 		if ok {
 			switch st.Code() {
 			case codes.Unavailable:
-				return dht.ID{}, "", false, ErrServerUnavailable
+				return id.ID{}, "", false, ErrServerUnavailable
 			case codes.DeadlineExceeded:
-				return dht.ID{}, "", false, ErrDeadlineExceeded
+				return id.ID{}, "", false, ErrDeadlineExceeded
 			default:
-				return dht.ID{}, "", false, fmt.Errorf("error finding predecessor: %w", err)
+				return id.ID{}, "", false, fmt.Errorf("error finding predecessor: %w", err)
 			}
 		}
 	}
 	// return the successor addressù
-	predID, err := dht.IDFromHexString(resp.Node.NodeId)
+	predID, err := id.IDFromHexString(resp.Node.NodeId)
 	if err != nil {
-		return dht.ID{}, "", false, fmt.Errorf("invalid predecessor ID %s: %w", resp.Node.NodeId, err)
+		return id.ID{}, "", false, fmt.Errorf("invalid predecessor ID %s: %w", resp.Node.NodeId, err)
 	}
 	return predID, resp.Node.Address, resp.Supernode, nil
 }
 
 // BecomeSuccessor is the handle for a new node that wants to join the network, it contacts its predecessor to notify him, and returns the new successor ID, address and whether it is a supernode or not.
-func (p *ConnectionPool) BecomeSuccessor(id dht.ID, addr string, sn bool, target string) (dht.ID, string, bool, error) {
+func (p *ConnectionPool) BecomeSuccessor(id id.ID, addr string, sn bool, target string) (id.ID, string, bool, error) {
 	logger.Log.Infof("Node %s is becoming successor on target %s", id.ToHexString(), target)
 	// create a context for the gRPC call
 	// get a connection to the target node
 	info, err := p.GetConnection(target)
 	if err != nil {
-		return dht.ID{}, "", false, err
+		return id.ID{}, "", false, err
 	}
 	defer info.release() // ensure the connection is released after use
 	client := pb.NewJoinServiceClient(info.conn)
@@ -306,35 +308,35 @@ func (p *ConnectionPool) BecomeSuccessor(id dht.ID, addr string, sn bool, target
 		if ok {
 			switch st.Code() {
 			case codes.Unavailable:
-				return dht.ID{}, "", false, ErrServerUnavailable
+				return id.ID{}, "", false, ErrServerUnavailable
 			case codes.DeadlineExceeded:
-				return dht.ID{}, "", false, ErrDeadlineExceeded
+				return id.ID{}, "", false, ErrDeadlineExceeded
 			case codes.FailedPrecondition:
 				for _, detail := range st.Details() {
 					if redirect, ok := detail.(*pb.RedirectInfo); ok {
 						logger.Log.Errorf("Redirecting to predecessor %s", redirect.Target.Node.Address)
-						redirectID, err := dht.IDFromHexString(redirect.Target.Node.NodeId)
+						redirectID, err := id.IDFromHexString(redirect.Target.Node.NodeId)
 						if err != nil {
-							return dht.ID{}, "", false, fmt.Errorf("invalid redirect ID %s: %w", redirect.Target.Node.NodeId, err)
+							return id.ID{}, "", false, fmt.Errorf("invalid redirect ID %s: %w", redirect.Target.Node.NodeId, err)
 						}
 						return redirectID, redirect.Target.Node.Address, redirect.Target.Supernode, ErrRedirect
 					}
 				}
-				return dht.ID{}, "", false, fmt.Errorf("error becoming successor from failed precondition: %w", err)
+				return id.ID{}, "", false, fmt.Errorf("error becoming successor from failed precondition: %w", err)
 			default:
-				return dht.ID{}, "", false, fmt.Errorf("error becoming successor: %w", err)
+				return id.ID{}, "", false, fmt.Errorf("error becoming successor: %w", err)
 			}
 		}
 	}
-	succID, err := dht.IDFromHexString(resp.Node.NodeId)
+	succID, err := id.IDFromHexString(resp.Node.NodeId)
 	if err != nil {
-		return dht.ID{}, "", false, fmt.Errorf("invalid successor ID %s: %w", resp.Node.NodeId, err)
+		return id.ID{}, "", false, fmt.Errorf("invalid successor ID %s: %w", resp.Node.NodeId, err)
 	}
 	return succID, resp.Node.Address, resp.Supernode, nil
 }
 
 // BecomePredecessor is the handle for a new node that wants to join the network, it contacts its successor to receive the routing table and resources, if it is not the successor because its ID is smaller than the old predecessor, it receives a redirect message.
-func (p *ConnectionPool) HandleBecomePredecessor(id dht.ID, addr string, sn bool, table *dht.Table, store *dht.Storage, target string) error {
+func (p *ConnectionPool) BecomePredecessor(id id.ID, addr string, sn bool, table *routingtable.Table, store *storage.Storage, target string) error {
 	// get a connection to the target node
 	logger.Log.Infof("Node %s is becoming predecessor on target %s", id.ToHexString(), target)
 	// create a context for the gRPC call
@@ -388,7 +390,7 @@ func (p *ConnectionPool) HandleBecomePredecessor(id dht.ID, addr string, sn bool
 			// Ricevo chunk routing table
 			for _, entry := range payload.RoutingChunk.Entries {
 				// add the routing entry to the routing table+
-				id, err := dht.IDFromHexString(entry.Node.Node.NodeId)
+				id, err := id.IDFromHexString(entry.Node.Node.NodeId)
 				if err != nil {
 					return fmt.Errorf("invalid node ID %s: %w", entry.Node.Node.NodeId, err)
 				}
@@ -427,7 +429,7 @@ func (p *ConnectionPool) HandleBecomePredecessor(id dht.ID, addr string, sn bool
 				if chunk.Eof {
 					tempFile.Close()
 
-					fileID, err := dht.IDFromHexString(currentFileMeta.Filename)
+					fileID, err := id.IDFromHexString(currentFileMeta.Filename)
 					if err != nil {
 						return fmt.Errorf("invalid resource ID %s: %w", currentFileMeta.Filename, err)
 					}
