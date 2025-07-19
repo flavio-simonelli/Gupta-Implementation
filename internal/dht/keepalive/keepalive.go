@@ -12,7 +12,6 @@ import (
 // Package keepalive provides the functionality for detecting node failure
 // in a distributed hash table (DHT) through periodic liveness checks.
 //
-// --- English ---
 // The KeepAlive functionality enables nodes in the DHT to detect the failure of their neighboring nodes.
 //
 // According to the adopted protocol, each node is responsible for monitoring the liveness of its immediate successor.
@@ -28,23 +27,6 @@ import (
 // If no message has been exchanged within `keepAliveInterval`, the goroutine actively sends a keep-alive message.
 // If the message fails or no response is received, the successor is assumed to have failed,
 // and the failure-handling procedure is triggered.
-//
-// --- Italiano ---
-// La funzionalità di KeepAlive permette ai nodi della DHT di rilevare il fallimento dei nodi vicini.
-//
-// Secondo il protocollo adottato, ogni nodo mantiene il keep-alive del proprio successore diretto.
-// Il parametro `keepAliveInterval` rappresenta l’intervallo massimo in cui un nodo può rimanere inattivo
-// (cioè senza inviare o ricevere messaggi dal successore) prima di essere considerato fallito.
-//
-// Ogni nodo è responsabile di inviare almeno un messaggio al proprio successore entro questo intervallo.
-// Quando possibile, il messaggio di keep-alive è "piggybacked" su altri messaggi (es. disseminazione),
-// per ridurre il traffico nella rete.
-//
-// L’implementazione consiste in una goroutine che viene avviata all’accensione del nodo.
-// Questa si risveglia periodicamente per verificare se il nodo ha comunicato recentemente con il successore.
-// Se non sono stati scambiati messaggi entro `keepAliveInterval`, la goroutine invia attivamente
-// un messaggio di keep-alive. In caso di errore o mancata risposta, il successore viene considerato fallito
-// e si avvia la procedura di rimozione dal sistema.
 
 // KeepAliveSender is the interface responsible for sending keep-alive messages to the successor.
 type KeepAliveSender interface {

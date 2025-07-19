@@ -30,12 +30,7 @@ type Communicator interface {
 }
 
 type Node struct {
-	ID                 id.ID                        // Unique identifier for the node
-	Addr               string                       // Address of the server in this node (ip:port)
 	T                  *routingtable.Table          // Routing table for the node
-	Supernode          bool                         // true if this node is a supernode
-	UnitLeader         bool                         // true if this node is a unit leader
-	SliceLeader        bool                         // true if this node is a slice leader
 	net                Communicator                 // Communicator interface for network operations (client)
 	MainStore          *storage.Storage             // Storage for the node
 	PredecessorStorage *storage.Storage             // Storage for the predecessor node. Is a 1 backup of the resources
@@ -46,6 +41,7 @@ type Node struct {
 // NewNode creates a new Node with the given ID, address, and communicator and initializes empty routing tables.
 func NewNode(id id.ID, ip string, port int, sn bool, client Communicator, mainStorage *storage.Storage, predecessorStorage *storage.Storage, standardBoard *event.EventDispatcher) *Node {
 	addr := fmt.Sprintf("%s:%d", ip, port)
+
 	return &Node{
 		ID:                 id,
 		Addr:               addr,
@@ -120,7 +116,7 @@ func (n *Node) GetResource(filename string) (*storage.MetadataResource, func() (
 	// Check if the resource ID is between the current node's ID and its predecessor's ID
 	// or if this node is the only node in the DHT
 	isResponsible := false
-	if  == n.ID { // This is the only node in the DHT
+	if resourceID == n.ID { // This is the only node in the DHT
 		isResponsible = true
 	} else if Between(n.PredID, n.ID, resourceID, true) {
 		isResponsible = true

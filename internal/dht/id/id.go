@@ -82,6 +82,12 @@ func StringToID(a string) ID {
 	return hash
 }
 
+// ChunkToID converts a byte slice to an ID. It expects the byte slice to be exactly 16 bytes long.
+func ChunkToID(chunk []byte) ID {
+	hash := md5.Sum(chunk)
+	return hash
+}
+
 // GenerateID creates a new ID based on the given address by hashing it with a timestamp salt.
 func GenerateID(ip string, port int) ID {
 	// Combine the IP and port into a string
