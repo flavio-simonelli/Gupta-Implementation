@@ -3,6 +3,7 @@ package keepalive
 import (
 	"GuptaDHT/internal/dht/routingtable"
 	"GuptaDHT/internal/logger"
+	"GuptaDHT/internal/transport/grpc/grpcclient"
 	"context"
 	"errors"
 	"sync/atomic"
@@ -28,31 +29,25 @@ import (
 // If the message fails or no response is received, the successor is assumed to have failed,
 // and the failure-handling procedure is triggered.
 
-// KeepAliveSender is the interface responsible for sending keep-alive messages to the successor.
-type KeepAliveSender interface {
-	// SendKeepAlive sends a keep-alive message to the specified receiver.
-	SendKeepAlive(receiver string) error
-}
-
 // KeepAlive is the struct that implements the keep-alive functionality for DHT nodes.
 type KeepAlive struct {
-	net               KeepAliveSender     // Network interface to send keep-alive messages
-	table             *routingtable.Table // Routing table to access the successor node
-	keepAliveInterval time.Duration       // Interval at which keep-alive messages are sent
-	lastSeen          atomic.Int64        // Timestamp of the last message received from the successor
-	cancel            context.CancelFunc  // Context cancellation function to stop the keep-alive goroutine (for shutdown node)
+	net               grpcclient.KeepAliveSender // Network interface to send keep-alive messages
+	table             *routingtable.Table        // Routing table to access the successor node
+	keepAliveInterval time.Duration              // Interval at which keep-alive messages are sent
+	lastSeen          atomic.Int64               // Timestamp of the last message received from the successor
+	cancel            context.CancelFunc         // Context cancellation function to stop the keep-alive goroutine (for shutdown node)
 }
 
 // InitializeKeepAlive initializes the KeepAlive struct with the given parameters and start the goroutine.
-func InitializeKeepAlive(net KeepAliveSender, table *routingtable.Table, keepAliveInterval time.Duration) *KeepAlive {
+func InitializeKeepAlive(net grpcclient.KeepAliveSender, table *routingtable.Table, keepAliveInterval time.Duration) *KeepAlive {
 	ka := &KeepAlive{
 		net:               net,
 		table:             table,
 		keepAliveInterval: keepAliveInterval,
 	}
 	// Start the keep-alive goroutine
-	ctx, cancel := context.WithCancel(context.Background())
-	go ka.start(ctx)
+	_, cancel := context.WithCancel(context.Background())
+	//go ka.start(ctx)
 	ka.cancel = cancel
 
 	return ka

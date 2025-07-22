@@ -2,12 +2,12 @@ package main
 
 import (
 	"GuptaDHT/internal/config"
-	"GuptaDHT/internal/dht/event"
 	"GuptaDHT/internal/dht/id"
-	"GuptaDHT/internal/dht/storage"
 	"GuptaDHT/internal/logger"
 	"GuptaDHT/internal/node"
-	transport "GuptaDHT/internal/transport/grpc"
+	client "GuptaDHT/internal/transport/grpc/grpcclient"
+	server "GuptaDHT/internal/transport/grpc/grpcserver"
+	"errors"
 )
 
 const (
@@ -23,75 +23,59 @@ func main() {
 		logger.Log.WithError(err).Fatal("Error loading configuration")
 	}
 	logger.Log.Infof("Loaded configuration from %s", DefaultConfigFile)
-	// initialize id parameters
+	// initialize identity parameters
 	err = id.InitializeIDParameters(configuration.DHT.K, configuration.DHT.U)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error initializing ID (K, U) parameters")
 	}
 	// initialize the address and port for the node
-	listener, err := transport.GetListener(configuration.Node.IP, configuration.Node.Port)
+	listener, err := server.GetListener(configuration.Node.IP, configuration.Node.Port)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error creating listener")
-		return
 	}
 	logger.Log.Infof("The server address is: %s", listener.Addr())
-	// generate a client handle for the node
-	client, err := transport.NewConnectionPool(configuration.Node.MaxConnectionsClient)
+	// generate a pool client for the node
+	poolClient, err := client.NewConnectionPool(configuration.Node.MaxConnectionsClient)
 	if err != nil {
-		logger.Log.WithError(err).Fatal("Error creating gRPC client connection pool")
-		return
+		logger.Log.WithError(err).Fatal("Error creating gRPC pool connection pool")
 	}
-	logger.Log.Infof("Create a client connection pool with max size: %d", configuration.Node.MaxConnectionsClient)
-	// initialize the storage for the node
-	mainStore := storage.NewStorage(configuration.Node.MainStorage, configuration.DHT.ChunkFileSize) //TODO: gestire i file entries
-	logger.Log.Infof("Initialized node storage at: %s", configuration.Node.MainStorage)
-	// initialize the storage backup for the predecessor node
-	predecessorStore := storage.NewStorage(configuration.Node.PredecessorStorage, configuration.DHT.ChunkFileSize)
-	logger.Log.Infof("Initialized predecessor backup storage at: %s", configuration.Node.PredecessorStorage)
-	// initializate the event boards for the node
-	normalBoard := event.NewEventDispatcher(client, configuration.DHT.RetryInterval)
-	logger.Log.Infof("Initialized normal event board with retry interval: %s", configuration.DHT.RetryInterval)
-	// create the id of the node from the configuration file or ip:port if not provided
-	id, err := id.IDFromHexString(configuration.Node.ID)
+	logger.Log.Infof("Create a pool connection pool with max size: %d", configuration.Node.MaxConnectionsClient)
+	// create the identity of the node from the configuration file or ip:port if not provided
+	identity, err := id.FromHexString(configuration.Node.ID)
 	if err != nil {
-		if err == id.ErrEmptyHexString {
+		if errors.Is(err, id.ErrEmptyHexString) {
 			// Generate a new ID if the provided hex string is empty
-			id = id.GenerateID(configuration.Node.IP, configuration.Node.Port)
-			logger.Log.Warnf("Provided ID is empty, generated new ID: %s", id.ToHexString())
+			identity = id.GenerateID(configuration.Node.IP, configuration.Node.Port)
+			logger.Log.Warnf("Provided ID is empty, generated new ID: %s", identity.ToHexString())
 		} else {
 			logger.Log.WithError(err).Fatal("Error creating node ID from hex string")
-			return
 		}
 	}
-	// create a new node with the configuration
-	node := node.NewNode(id, configuration.Node.IP, configuration.Node.Port, configuration.Node.Supernode, client, mainStore, predecessorStore, normalBoard)
-	logger.Log.Infof("Create a new struct Node")
-	// save the new configuration node in the configuration file
-	err = config.SaveNodeInfo(DefaultConfigFile, node.ID.ToHexString(), node.Addr)
+	// create a new node with the identity and address
+	n, err := node.NewNode(identity, listener.Addr().String(), configuration.Node.Supernode, poolClient, poolClient, configuration.DHT.TimeKeepAlive)
 	if err != nil {
-		logger.Log.WithError(err).Errorf("Error saving node info but continuing")
+		logger.Log.WithError(err).Fatal("Error creating new node")
 	}
-	// join the DHT network if a bootstrap node is provided or create a new one
+	// chack if there are a bootstrap node to join the DHT network
 	if configuration.DHT.BootstrapNode == "" {
 		logger.Log.Info("No bootstrap node provided, creating a new DHT network")
-		err := node.CreateDHT()
+		// create a new DHT network
+		err = n.CreateNetwork()
 		if err != nil {
-			return
+			logger.Log.WithError(err).Fatal("Error creating new DHT network")
 		}
+		logger.Log.Infof("Node %s is now the first node in the DHT network", identity.ToHexString())
 	} else {
-		logger.Log.Infof("Joining an existing DHT network using bootstrap node: %s", configuration.DHT.BootstrapNode)
-		err := node.Join(configuration.DHT.BootstrapNode)
+		logger.Log.Infof("Joining DHT network using bootstrap node: %s", configuration.DHT.BootstrapNode)
+		// join the DHT network using the bootstrap node
+		err = n.Join(configuration.DHT.BootstrapNode)
 		if err != nil {
-			return
+			logger.Log.WithError(err).Fatal("Error joining DHT network")
 		}
 	}
 	// run the gRPC server
-	err = transport.RunServer(node, listener)
+	err = server.RunServer(n, listener)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error running gRPC server")
-		return
 	}
-	return
 }
-
-//TODO: implement a graceful shutdown mechanism for the node

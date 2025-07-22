@@ -17,16 +17,12 @@ func newNeighbor() *neighbor {
 	}
 }
 
-// setEntry sets the entry of the neighbor. (Thread-safe)
+// setEntry sets the entry of the neighbor.
 func (n *neighbor) setEntry(entry *routingEntry) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.entry = entry
 }
 
-// getEntry retrieves the entry of the neighbor. (Thread-safe)
+// getEntry retrieves the entry of the neighbor.
 func (n *neighbor) getEntry() *routingEntry {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
 	return n.entry
 }

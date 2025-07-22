@@ -115,8 +115,8 @@ func (p *ConnectionPool) newConnection(target string) (*ConnectionInfo, error) {
 		return nil, err
 	}
 	ci := &ConnectionInfo{
-		conn: conn,
-		p:    p,
+		client: conn,
+		p:      p,
 	}
 	return ci, nil
 }
@@ -181,7 +181,7 @@ func (p *ConnectionPool) Shutdown(ctx context.Context) error {
 CLOSE:
 	// Close all connections regardless of usage state after timeout or all free
 	for _, ci := range p.connections {
-		_ = ci.conn.Close()
+		_ = ci.client.Close()
 	}
 	p.connections = make(map[string]*ConnectionInfo)
 	// Wake up all goroutines waiting on cond.Wait()

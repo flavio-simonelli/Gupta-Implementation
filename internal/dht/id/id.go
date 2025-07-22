@@ -103,8 +103,8 @@ func (id ID) ToHexString() string {
 	return fmt.Sprintf("%x", id)
 }
 
-// IDFromHexString converts a hexadecimal string representation of an ID back to an ID type.
-func IDFromHexString(hexStr string) (ID, error) {
+// FromHexString converts a hexadecimal string representation of an ID back to an ID type.
+func FromHexString(hexStr string) (ID, error) {
 	if hexStr == "" {
 		return ID{}, ErrEmptyHexString
 	}

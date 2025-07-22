@@ -14,7 +14,7 @@ var (
 
 // ConnectionInfo holds information about a gRPC connection to other node.
 type ConnectionInfo struct {
-	conn     *grpc.ClientConn // gRPC connection to the target node
+	client   *grpc.ClientConn // gRPC connection to the target node
 	useCount atomic.Int32     // number of goroutine currently using this connection
 	lastUse  atomic.Int64     // last time this connection was used, in nanoseconds (update on acquire)
 	p        *ConnectionPool  // pointer to the connection pool that manages this connection for notify if it is no longer in use
@@ -43,5 +43,5 @@ func (ci *ConnectionInfo) remove() error {
 	if ci.isInUse() {
 		return ErrConnectionInUse
 	}
-	return ci.conn.Close()
+	return ci.client.Close()
 }

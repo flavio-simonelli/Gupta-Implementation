@@ -2,6 +2,7 @@ package routingtable
 
 import (
 	"GuptaDHT/internal/dht/id"
+	"GuptaDHT/internal/logger"
 	"errors"
 )
 
@@ -56,7 +57,7 @@ func NewTable(selfID id.ID, selfAddr string, selfSN bool) (*Table, error) {
 }
 
 // GetSelf returns the self-information of the node.
-func (t *Table) GetSelf() Entry {
+func (t *Table) GetSelf() PublicEntry {
 	// lock thread-safe access
 	t.sn.mu.RLock()
 	defer t.sn.mu.RUnlock()
@@ -73,7 +74,7 @@ func (t *Table) GetSelf() Entry {
 }
 
 // GetMyPredecessor returns the predecessor entry of the node.
-func (t *Table) GetMyPredecessor() (Entry, error) {
+func (t *Table) GetMyPredecessor() (PublicEntry, error) {
 	// lock thread-safe access
 	t.pred.mu.RLock()
 	defer t.pred.mu.RUnlock()
@@ -86,7 +87,7 @@ func (t *Table) GetMyPredecessor() (Entry, error) {
 
 	pred := t.pred.getEntry()
 	if pred == nil {
-		return Entry{}, ErrNeighborNotFound
+		return PublicEntry{}, ErrNeighborNotFound
 	}
 	isSN := t.sn.containsEntry(pred.GetID())
 	isUL := t.ul.containsEntry(pred.GetID())
@@ -95,7 +96,7 @@ func (t *Table) GetMyPredecessor() (Entry, error) {
 }
 
 // GetMySuccessor returns the successor entry of the node.
-func (t *Table) GetMySuccessor() (Entry, error) {
+func (t *Table) GetMySuccessor() (PublicEntry, error) {
 	// lock thread-safe access
 	t.succ.mu.RLock()
 	defer t.succ.mu.RUnlock()
@@ -108,7 +109,7 @@ func (t *Table) GetMySuccessor() (Entry, error) {
 
 	succ := t.succ.getEntry()
 	if succ == nil {
-		return Entry{}, ErrNeighborNotFound
+		return PublicEntry{}, ErrNeighborNotFound
 	}
 	isSN := t.sn.containsEntry(succ.GetID())
 	isUL := t.ul.containsEntry(succ.GetID())
@@ -117,7 +118,7 @@ func (t *Table) GetMySuccessor() (Entry, error) {
 }
 
 // GetSuccessor finds the successor entry for a given ID in the routing table.
-func (t *Table) GetSuccessor(id id.ID) (Entry, error) {
+func (t *Table) GetSuccessor(id id.ID) (PublicEntry, error) {
 	// lock thread-safe access
 	t.rt.mu.RLock()
 	defer t.rt.mu.RUnlock()
@@ -130,7 +131,7 @@ func (t *Table) GetSuccessor(id id.ID) (Entry, error) {
 
 	entry, _, err := t.rt.findSuccessor(id)
 	if err != nil {
-		return Entry{}, err
+		return PublicEntry{}, err
 	}
 	isSN := t.sn.containsEntry(entry.GetID())
 	isUL := t.ul.containsEntry(entry.GetID())
@@ -139,7 +140,7 @@ func (t *Table) GetSuccessor(id id.ID) (Entry, error) {
 }
 
 // GetPredecessor finds the predecessor entry for a given ID in the routing table.
-func (t *Table) GetPredecessor(id id.ID) (Entry, error) {
+func (t *Table) GetPredecessor(id id.ID) (PublicEntry, error) {
 	// lock thread-safe access
 	t.rt.mu.RLock()
 	defer t.rt.mu.RUnlock()
@@ -152,7 +153,7 @@ func (t *Table) GetPredecessor(id id.ID) (Entry, error) {
 
 	entry, _, err := t.rt.findPredecessor(id)
 	if err != nil {
-		return Entry{}, err
+		return PublicEntry{}, err
 	}
 	isSN := t.sn.containsEntry(entry.GetID())
 	isUL := t.ul.containsEntry(entry.GetID())
@@ -161,7 +162,7 @@ func (t *Table) GetPredecessor(id id.ID) (Entry, error) {
 }
 
 // AddEntry adds a new entry to the routing table. It returns an error if the entry already exists or if the address is invalid.
-func (t *Table) AddEntry(entry Entry) error {
+func (t *Table) AddEntry(entry PublicEntry) error {
 	// lock thread-safe access
 	t.rt.mu.RLock()
 	defer t.rt.mu.RUnlock()
@@ -206,29 +207,33 @@ func (t *Table) AddEntry(entry Entry) error {
 	return nil
 }
 
-// BecamePredecessor sets the node as the predecessor of the given ID in the routing table.
-func (t *Table) BecamePredecessor(id id.ID) error {
+// SetPredecessor sets the node as the predecessor of the given ID in the routing table.
+func (t *Table) SetPredecessor(id id.ID) error {
 	// lock thread-safe access
 	t.rt.mu.RLock()
 	defer t.rt.mu.RUnlock()
+	logger.Log.Infof("finding predecessor for ID: %s", id.ToHexString())
 	entry, _, err := t.rt.findSuccessor(id)
 	if err != nil {
 		return err
 	}
 	t.pred.mu.Lock()
+	defer t.pred.mu.Unlock()
+	logger.Log.Infof("setting predecessor for ID: %s to entry: %s", id.ToHexString(), entry.GetID().ToHexString())
 	t.pred.setEntry(entry) // set the predecessor entry
-	t.pred.mu.Unlock()
 	return nil
 }
 
-// BecameSuccessor sets the node as the successor of the given ID in the routing table.
-func (t *Table) BecameSuccessor(id id.ID) error {
+// SetSuccessor sets the node as the successor of the given ID in the routing table.
+func (t *Table) SetSuccessor(id id.ID) error {
 	t.rt.mu.RLock()
 	defer t.rt.mu.RUnlock()
 	entry, _, err := t.rt.findPredecessor(id)
 	if err != nil {
 		return err
 	}
+	t.succ.mu.Lock()
+	defer t.succ.mu.Unlock()
 	t.succ.setEntry(entry) // set the successor entry
 	return nil
 }
@@ -259,7 +264,7 @@ func (t *Table) BecomeSliceLeader(id id.ID) error {
 }
 
 // RemoveEntry removes an entry from the routing table. It returns an error if the entry does not exist.
-func (t *Table) RemoveEntry(entry Entry) error {
+func (t *Table) RemoveEntry(entry PublicEntry) error {
 	if entry.Address == "" {
 		return ErrInvalidAddress // Invalid parameters, return error
 	}

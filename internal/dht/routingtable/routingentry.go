@@ -2,7 +2,7 @@ package routingtable
 
 import "GuptaDHT/internal/dht/id"
 
-// La struttura Routing Entry rappresenta l'unità elementare di una routing table. rappresenta una singola entry composta da identificativo del nodo e il suo indirizzo.
+// La struttura Routing PublicEntry rappresenta l'unità elementare di una routing table. rappresenta una singola entry composta da identificativo del nodo e il suo indirizzo.
 
 // routingEntry rapresent a single entry in the routing table of a DHT node.
 type routingEntry struct {

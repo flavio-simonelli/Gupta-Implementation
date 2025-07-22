@@ -1,175 +1,72 @@
 package node
 
 import (
-	"GuptaDHT/internal/dht/event"
 	"GuptaDHT/internal/dht/id"
+	"GuptaDHT/internal/dht/keepalive"
 	"GuptaDHT/internal/dht/routingtable"
-	"GuptaDHT/internal/dht/storage"
 	"GuptaDHT/internal/logger"
-	"errors"
+	"GuptaDHT/internal/transport/grpc/grpcclient"
 	"fmt"
-	"io"
+	"time"
 )
-
-var (
-	ErrCreateDHTNetwork = errors.New("error creating DHT network")
-	ErrContactBootstrap = errors.New("error contacting bootstrap node")
-	ErrContactSucc      = errors.New("error contacting successor node")
-	ErrResourceNotFound = errors.New("resource not found")
-)
-
-type Communicator interface {
-	FindPredecessor(id id.ID, target string) (id.ID, string, bool, error)
-	BecomeSuccessor(id id.ID, addr string, sn bool, target string) (id.ID, string, bool, error)
-	BecomePredecessor(id id.ID, addr string, sn bool, table *routingtable.Table, store *storage.Storage, target string) error
-	// GetResource retrieves a resource from another node by ID and filename
-	GetResource(resourceID id.ID, filename string, targetAddr string) (*storage.MetadataResource, func() ([]byte, error), error)
-	// Notify notifies a nod one or more events
-	//Notify(ctx context.Context, addr string, event string) error
-	// per adesso ci fermiamo alla join
-}
 
 type Node struct {
-	T                  *routingtable.Table          // Routing table for the node
-	net                Communicator                 // Communicator interface for network operations (client)
-	MainStore          *storage.Storage             // Storage for the node
-	PredecessorStorage *storage.Storage             // Storage for the predecessor node. Is a 1 backup of the resources
-	StandardBoard      *event.EventDispatcher       // Board of events for normal nodes (used to send events to the slice leader)
-	LeaderBoard        *event.SliceLeaderDispatcher //  board of events use only if the node is a slice leader
+	T           *routingtable.Table   // Routing table for the node
+	kpSuccessor *keepalive.KeepAlive  // struct to manage the successor node's keep-alive
+	client      grpcclient.NodeClient // gRPC client for communication with other nodes
 }
 
-// NewNode creates a new Node with the given ID, address, and communicator and initializes empty routing tables.
-func NewNode(id id.ID, ip string, port int, sn bool, client Communicator, mainStorage *storage.Storage, predecessorStorage *storage.Storage, standardBoard *event.EventDispatcher) *Node {
-	addr := fmt.Sprintf("%s:%d", ip, port)
-
-	return &Node{
-		ID:                 id,
-		Addr:               addr,
-		T:                  routingtable.NewTable(),
-		Supernode:          sn,
-		UnitLeader:         false,
-		SliceLeader:        false,
-		net:                client,
-		MainStore:          mainStorage,
-		PredecessorStorage: predecessorStorage,
-		StandardBoard:      standardBoard,
+// NewNode creates a new Node
+func NewNode(selfID id.ID, selfAddr string, selfSN bool, clientNode grpcclient.NodeClient, kpSender grpcclient.KeepAliveSender, kpInterval time.Duration) (*Node, error) {
+	// Create a new table for the node
+	table, err := routingtable.NewTable(selfID, selfAddr, selfSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create routing table: %w", err)
 	}
+	// Create a new Node with the routing table
+	node := &Node{
+		T:           table,
+		kpSuccessor: keepalive.InitializeKeepAlive(kpSender, table, kpInterval),
+		client:      clientNode,
+	}
+	return node, nil
 }
 
-// Join is the method that allows a node to join an existing DHT network.
-func (n *Node) Join(bootstrap string) error {
-	logger.Log.Infof("Node %s is trying to join the DHT network", n.ID.ToHexString())
-	// find the predecessor of the node in the DHT network
-	predID, predAddr, predSn, err := n.net.FindPredecessor(n.ID, bootstrap)
+// Join is the method to join the DHT network
+func (n *Node) Join(bootstrapAddr string) error {
+	// request the bootstrap node to find my predecessor
+	predecessor, err := n.client.FindPredecessor(n.T.GetSelf().ID, bootstrapAddr)
 	if err != nil {
-		logger.Log.Errorf("Node %s failed to find predecessor: %v", n.ID.ToHexString(), err)
-		return fmt.Errorf("%w: %v", ErrContactBootstrap, err)
+		return fmt.Errorf("failed to find predecessor: %w", err)
 	}
-	logger.Log.Infof("Node %s found predecessor %s at address %s", n.ID.ToHexString(), predID.ToHexString(), predAddr)
-	// insert the predecessor in the routing table
-	err = n.T.AddEntry(predID, predAddr, predSn, false, false)
+	// log the predecessor found
+	logger.Log.Infof("Predecessor found: %s at %s", predecessor.ID.ToHexString(), predecessor.Address)
+
+	// become the successor of the predecessor
+	successor, err := n.client.BecomeSuccessor(n.T.GetSelf().ID, n.T.GetSelf().Address, n.T.GetSelf().IsSN, predecessor.Address)
 	if err != nil {
-		logger.Log.Errorf("Node %s failed to add predecessor to routing table: %v", n.ID.ToHexString(), err)
+		return fmt.Errorf("failed to become successor: %w", err)
+	}
+	// log the successor found
+	logger.Log.Infof("Successor found: %s at %s", successor.ID.ToHexString(), successor.Address)
+	return nil
+}
+
+// CreateNetwork creates a new DHT network by becoming the first node
+func (n *Node) CreateNetwork() error {
+	// Set the predecessor and successor to self
+	logger.Log.Infof("setting self as predecessor for node %s", n.T.GetSelf().ID.ToHexString())
+	err := n.T.SetPredecessor(n.T.GetSelf().ID)
+	if err != nil {
 		return err
 	}
-	// become the successor of the predecessor
-	succID, succAddr, succSn, err := n.net.BecomeSuccessor(n.ID, n.Addr, n.Supernode, predAddr)
+	// Set the successor to self
+	logger.Log.Infof("setting self as successor for node %s", n.T.GetSelf().ID.ToHexString())
+	err = n.T.SetSuccessor(n.T.GetSelf().ID)
 	if err != nil {
-		for errors.Is(err, routingtable.ErrSuccRedirect) {
-			logger.Log.Infof("Node %s is being redirected to another successor: %v", n.ID.ToHexString(), err)
-			// retry with the new successor address
-			succID, succAddr, succSn, err = n.net.BecomeSuccessor(n.ID, n.Addr, n.Supernode, predAddr)
-		}
-		if err != nil {
-			logger.Log.Errorf("Node %s failed to become successor: %v", n.ID.ToHexString(), err)
-			return fmt.Errorf("%w: %v", ErrContactSucc, err)
-		}
+		return err
 	}
-	// add the successor to the routing table
-	err = n.T.AddEntry(succID, succAddr, succSn, false, false)
-	if err != nil {
-		logger.Log.Errorf("Node %s failed to add successor to routing table: %v", n.ID.ToHexString(), err)
-	}
-	// become the predecessor of the successor
-	n.net.BecomePredecessor(n.ID, n.Addr, n.Supernode, n.T, n.MainStore, succAddr)
-	logger.Log.Infof("Node %s successfully joined the DHT network as successor of %s", n.ID.ToHexString(), succID.ToHexString())
+	// Log the creation of the network
+	logger.Log.Infof("Node %s created a new DHT network at %s", n.T.GetSelf().ID.ToHexString(), n.T.GetSelf().Address)
 	return nil
-}
-
-// CreateDHT creates a new DHT network.
-func (n *Node) CreateDHT() error {
-	// add the node in the routing table
-	if err := n.T.AddEntry(n.ID, n.Addr, n.Supernode, true, true); err != nil {
-		logger.Log.Errorf("Node %s failed to add itself to routing table: %v", n.ID.ToHexString(), err)
-		return fmt.Errorf("%w: %v", ErrCreateDHTNetwork, err)
-	}
-	logger.Log.Infof("Node %s created a new DHT network", n.ID.ToHexString())
-	return nil
-}
-
-// GetResource retrieves a resource from the storage by its ID.
-// If the resource is not in this node, it forwards the request to the successor.
-// Returns the resource metadata and a function to read chunks of the resource.
-func (n *Node) GetResource(filename string) (*storage.MetadataResource, func() ([]byte, error), error) {
-	resourceID := id.StringToID(filename)
-	logger.Log.Debugf("Node %s: Request to get resource %s", n.ID.ToHexString(), resourceID.ToHexString())
-	// Check if the resource ID is between the current node's ID and its predecessor's ID
-	// or if this node is the only node in the DHT
-	isResponsible := false
-	if resourceID == n.ID { // This is the only node in the DHT
-		isResponsible = true
-	} else if Between(n.PredID, n.ID, resourceID, true) {
-		isResponsible = true
-	}
-
-	if isResponsible {
-		// The resource should be in this node
-		logger.Log.Debugf("Node %s: Resource %s should be in this node", n.ID.ToHexString(), resourceID.ToHexString())
-
-		// Try to get metadata and open the file
-		metadata, exists := n.MainStore.GetMetadata(resourceID)
-		if !exists {
-			return nil, nil, ErrResourceNotFound
-		}
-
-		file, err := n.MainStore.OpenFile(resourceID)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		// Return the metadata and a function to read chunks
-		chunkReader := func() ([]byte, error) {
-			chunk, err := storage.ReadChunkFile(file, storage.FileChunkSize)
-			if err == io.EOF {
-				// When we reach EOF, close the file and release the resource lock
-				n.MainStore.CloseFile(file, metadata)
-				return nil, io.EOF
-			}
-			if err != nil {
-				// On error, close the file and release the resource lock
-				n.MainStore.CloseFile(file, metadata)
-				return nil, err
-			}
-			return chunk, nil
-		}
-
-		return metadata, chunkReader, nil
-	}
-
-	// The resource is not in this node, forward the request to the successor
-	logger.Log.Debugf("Node %s: Resource %s not in this node, forwarding to successor", n.ID.ToHexString(), resourceID.ToHexString())
-
-	// Get successor info
-	succID, succAddr, _, err := n.T.GetEntry(0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get successor: %w", err)
-	}
-
-	// Forward the request to the successor
-	metadata, chunkReader, err := n.net.GetResource(resourceID, filename, succAddr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get resource from successor %s: %w", succID.ToHexString(), err)
-	}
-
-	return metadata, chunkReader, nil
 }
