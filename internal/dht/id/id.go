@@ -231,6 +231,31 @@ func (id ID) FirstIDOfSlice() (ID, error) {
 	return bigIntToID(startInt)
 }
 
+// FirstIDOfSlice returns the first ID of the slice with the given index.
+func FirstIDOfSlice(sliceIdx int) (ID, error) {
+	if sliceIdx < 0 || sliceIdx >= k {
+		return ID{}, fmt.Errorf("slice index %d out of range [0, %d)", sliceIdx, k)
+	}
+	startInt := new(big.Int).Mul(big.NewInt(int64(sliceIdx)), sliceSz)
+	return bigIntToID(startInt)
+}
+
+// FirstIDOfUnit returns the first ID of the unit with the given slice and unit indices.
+func FirstIDOfUnit(sliceIdx, unitIdx int) (ID, error) {
+	if sliceIdx < 0 || sliceIdx >= k {
+		return ID{}, fmt.Errorf("slice index %d out of range [0, %d)", sliceIdx, k)
+	}
+	if unitIdx < 0 || unitIdx >= u {
+		return ID{}, fmt.Errorf("unit index %d out of range [0, %d)", unitIdx, u)
+	}
+
+	startInt := new(big.Int).Add(
+		new(big.Int).Mul(big.NewInt(int64(sliceIdx)), sliceSz),
+		new(big.Int).Mul(big.NewInt(int64(unitIdx)), unitSz),
+	)
+	return bigIntToID(startInt)
+}
+
 // SameSlice reports whether id and other fall into the same slice
 // using the given K (number of slices). The comparison is 1‑based:
 //

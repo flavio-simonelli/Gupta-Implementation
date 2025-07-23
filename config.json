@@ -11,7 +11,7 @@
   "dht": {
     "K": 16,
     "U": 20,
-    "bootstrap_node": "192.168.1.107:42833",
+    "bootstrap_node": "192.168.1.107:39539",
     "time_keep_alive": 10000,
     "t_big": 10000,
     "t_wait": 1000,

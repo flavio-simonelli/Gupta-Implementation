@@ -4,6 +4,7 @@ import (
 	"GuptaDHT/internal/dht/id"
 	"GuptaDHT/internal/logger"
 	"errors"
+	"sync/atomic"
 )
 
 var (
@@ -11,17 +12,23 @@ var (
 	ErrInvalidAddress = errors.New("invalid address")
 	// ErrNeighborNotFound is an error indicating that the neighbor entry was not found.
 	ErrNeighborNotFound = errors.New("neighbor not found")
+	// SliceLeaderItself is an error indicating that the node is the slice leader of itself.
+	SliceLeaderItself = errors.New("node is the slice leader of itself")
+	// ErrSliceLeaderNotFound is an error indicating that the slice leader entry was not found.
+	ErrSliceLeaderNotFound = errors.New("slice leader not found")
 )
 
 // Table is the main structure representing the routing table of a DHT node and contains multiple routingTable instances for different purposes. (NOT Thread-Safe)
 type Table struct {
-	rt   *routingTable // routing table of the node
-	ul   *routingTable // unit leaders table of the node
-	sl   *routingTable // slice leaders table of the node
-	sn   *routingTable // supernodes table of the node
-	pred *neighbor     // entry pointer to the predecessor node
-	succ *neighbor     // entry pointer to the successor node
-	self *routingEntry // entry pointer to the self node (the node itself)
+	rt            *routingTable // routing table of the node
+	ul            *routingTable // unit leaders table of the node
+	sl            *routingTable // slice leaders table of the node
+	sn            *routingTable // supernodes table of the node
+	pred          *neighbor     // entry pointer to the predecessor node
+	succ          *neighbor     // entry pointer to the successor node
+	self          *routingEntry // entry pointer to the self node (the node itself)
+	isSliceLeader atomic.Bool   // indicates if the node is a slice leader
+	isUnitLeader  atomic.Bool   // indicates if the node is a unit leader
 }
 
 // NewTable creates a new Table with empty routing tables and initializes the predecessor, successor, and self entries.
@@ -115,6 +122,93 @@ func (t *Table) GetMySuccessor() (PublicEntry, error) {
 	isUL := t.ul.containsEntry(succ.GetID())
 	isSL := t.sl.containsEntry(succ.GetID())
 	return toPublicEntry(succ, isSL, isSN, isUL), nil
+}
+
+// GetMySliceLeader returns the slice leaders entries of the node
+func (t *Table) GetMySliceLeader() (PublicEntry, error) {
+	// lock thread-safe access
+	t.sl.mu.RLock()
+	defer t.sl.mu.RUnlock()
+	// find my slice leader
+	firstIdSlice, err := t.self.id.FirstIDOfSlice()
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	sliceleader, _, err := t.sl.findSuccessor(firstIdSlice)
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	// check if the node find is the slice leader of myself
+	if t.self.id.SameSlice(sliceleader.id) {
+		if t.self.id.Equals(sliceleader.id) {
+			// the node is the slice leader of itself
+			// return the self entry
+			isSN := t.sn.containsEntry(t.self.id)
+			isUL := t.ul.containsEntry(t.self.id)
+			node := toPublicEntry(t.self, true, isSN, isUL)
+			return node, SliceLeaderItself
+		}
+		// the node is not the slice leader of itself, return the slice leader entry
+		isSN := t.sn.containsEntry(sliceleader.GetID())
+		isUL := t.ul.containsEntry(sliceleader.GetID())
+		node := toPublicEntry(t.self, true, isSN, isUL)
+		return node, nil
+	}
+	return PublicEntry{}, ErrSliceLeaderNotFound
+}
+
+// GetSliceLeader returns the slice leader entry for a given ID in the routing table.
+func (t *Table) GetSliceLeader(index int) (PublicEntry, error) {
+	// find the slice leader for the given ID
+	firstIdSlice, err := id.FirstIDOfSlice(index)
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	// lock thread-safe access
+	t.sl.mu.RLock()
+	defer t.sl.mu.RUnlock()
+	sliceleader, _, err := t.sl.findSuccessor(firstIdSlice)
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	// check if the node find is the slice leader of myself
+	t.sn.mu.RLock()
+	isSN := t.sn.containsEntry(sliceleader.GetID())
+	t.sn.mu.RUnlock()
+	t.ul.mu.RLock()
+	isUL := t.ul.containsEntry(sliceleader.GetID())
+	t.ul.mu.RUnlock()
+	t.sl.mu.RLock()
+	isSL := t.sl.containsEntry(sliceleader.GetID())
+	t.sl.mu.RUnlock()
+	return toPublicEntry(sliceleader, isSL, isSN, isUL), nil
+}
+
+// GetUnitLeader finds the unit leader entry for a given ID in the routing table.
+func (t *Table) GetUnitLeader(sliceIndex, unitIndex int) (PublicEntry, error) {
+	// find the first ID of the unit that contains the given slice and unit indices
+	firstIdUnit, err := id.FirstIDOfUnit(sliceIndex, unitIndex)
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	// lock thread-safe access
+	t.ul.mu.RLock()
+	defer t.ul.mu.RUnlock()
+
+	entry, _, err := t.ul.findSuccessor(firstIdUnit)
+	if err != nil {
+		return PublicEntry{}, err
+	}
+	t.sn.mu.RLock()
+	isSN := t.sn.containsEntry(entry.GetID())
+	t.sn.mu.RUnlock()
+	t.ul.mu.RLock()
+	isUL := t.ul.containsEntry(entry.GetID())
+	t.ul.mu.RUnlock()
+	t.sl.mu.RLock()
+	isSL := t.sl.containsEntry(entry.GetID())
+	t.sl.mu.RUnlock()
+	return toPublicEntry(entry, isSL, isSN, isUL), nil
 }
 
 // GetSuccessor finds the successor entry for a given ID in the routing table.
@@ -263,36 +357,63 @@ func (t *Table) BecomeSliceLeader(id id.ID) error {
 	return t.sl.addEntry(entry)
 }
 
-// RemoveEntry removes an entry from the routing table. It returns an error if the entry does not exist.
-func (t *Table) RemoveEntry(entry PublicEntry) error {
-	if entry.Address == "" {
-		return ErrInvalidAddress // Invalid parameters, return error
-	}
-	// remove the entry from the routing table
-	err := t.rt.removeEntry(entry.ID)
+// IBecomeSliceLeader sets the node as a slice leader in the slice leaders table, but does not check if the node is already a slice leader.
+func (t *Table) IBecomeSliceLeader() error {
+	// set the entry in the slice leaders table
+	t.sl.mu.Lock()
+	defer t.sl.mu.Unlock()
+	err := t.sl.addEntry(t.self)
 	if err != nil {
 		return err
 	}
-	// if the entry is a supernode, remove it from the supernodes table
-	if entry.IsSN {
-		err = t.sn.removeEntry(entry.ID)
-		if err != nil {
-			return err
-		}
+	t.isSliceLeader.Store(true) // mark the node as a slice leader
+	return nil
+}
+
+// IsSliceLeader checks if the node is a slice leader.
+func (t *Table) IsSliceLeader() bool {
+	return t.isSliceLeader.Load() // return the slice leader status
+}
+
+// IBecomeUnitLeader sets the node as a unit leader in the unit leaders table, but does not check if the node is already a unit leader.
+func (t *Table) IBecomeUnitLeader() error {
+	// set the entry in the unit leaders table
+	t.ul.mu.Lock()
+	defer t.ul.mu.Unlock()
+	err := t.ul.addEntry(t.self)
+	if err != nil {
+		return err
 	}
-	// if the entry is a unit leader, remove it from the unit leaders table
-	if entry.IsUL {
-		err = t.ul.removeEntry(entry.ID)
-		if err != nil {
-			return err
-		}
+	t.isUnitLeader.Store(true) // mark the node as a unit leader
+	return nil
+}
+
+// IsUnitLeader checks if the node is a unit leader.
+func (t *Table) IsUnitLeader() bool {
+	return t.isUnitLeader.Load() // return the unit leader status
+}
+
+// RemoveEntry removes an entry from the routing table. It returns an error if the entry does not exist.
+func (t *Table) RemoveEntry(identity id.ID) error {
+	// remove the entry from the routing table
+	t.rt.mu.Lock()
+	err := t.rt.removeEntry(identity)
+	if err != nil {
+		t.rt.mu.Unlock()
+		return err
 	}
-	// if the entry is a slice leader, remove it from the slice leaders table
-	if entry.IsSL {
-		err = t.sl.removeEntry(entry.ID)
-		if err != nil {
-			return err
-		}
-	}
+	t.rt.mu.Unlock()
+	// remove in the supernodes table if the entry is a supernode
+	t.sn.mu.Lock()
+	_ = t.sn.removeEntry(identity)
+	t.sn.mu.Unlock()
+	// remove in the unit leaders table if the entry is a unit leader
+	t.ul.mu.Lock()
+	_ = t.ul.removeEntry(identity)
+	t.ul.mu.Unlock()
+	// remove in the slice leaders table if the entry is a slice leader
+	t.sl.mu.Lock()
+	_ = t.sl.removeEntry(identity)
+	t.sl.mu.Unlock()
 	return nil
 }

@@ -103,8 +103,8 @@ func (ka *KeepAlive) Stop() {
 		ka.cancel() // Cancel the context to stop the goroutine
 		ka.cancel = nil
 	}
-	ka.table = nil // Clear the successor reference
-	ka.net = nil   // Clear the network reference
+	ka.table = nil // clear the successor reference
+	ka.net = nil   // clear the network reference
 }
 
 // UpdateLastSeen updates the timestamp of the last message received from the successor.

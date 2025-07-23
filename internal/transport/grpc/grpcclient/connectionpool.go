@@ -16,21 +16,23 @@ var (
 
 // ConnectionPool manages gRPC connections to peers.
 type ConnectionPool struct {
-	mu          sync.RWMutex               // mutex to protect access to the connections map
-	cond        *sync.Cond                 // condition variable to signal when connections are available
-	connections map[string]*ConnectionInfo // map of connections indexed by target address (ip:port)
-	maxSize     int                        // maximum number of connections allowed in the pool
-	closed      atomic.Bool                // atomic boolean to indicate if the pool is closed
+	mu             sync.RWMutex               // mutex to protect access to the connections map
+	cond           *sync.Cond                 // condition variable to signal when connections are available
+	connections    map[string]*ConnectionInfo // map of connections indexed by target address (ip:port)
+	maxSize        int                        // maximum number of connections allowed in the pool
+	closed         atomic.Bool                // atomic boolean to indicate if the pool is closed
+	chunkEventSize int                        // size of the chunk event to send
 }
 
 // NewConnectionPool creates a new pool with max number of allowed connections.
-func NewConnectionPool(maxSize int) (*ConnectionPool, error) {
+func NewConnectionPool(maxSize, chunkEventSize int) (*ConnectionPool, error) {
 	if maxSize <= 0 {
 		return nil, ErrInvalidMaxSize
 	}
 	pool := &ConnectionPool{
-		connections: make(map[string]*ConnectionInfo),
-		maxSize:     maxSize,
+		connections:    make(map[string]*ConnectionInfo),
+		maxSize:        maxSize,
+		chunkEventSize: chunkEventSize,
 	}
 	pool.cond = sync.NewCond(&pool.mu) // initialize the condition variable with the pool's mutex
 	return pool, nil

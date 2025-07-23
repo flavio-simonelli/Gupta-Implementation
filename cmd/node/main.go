@@ -35,7 +35,7 @@ func main() {
 	}
 	logger.Log.Infof("The server address is: %s", listener.Addr())
 	// generate a pool client for the node
-	poolClient, err := client.NewConnectionPool(configuration.Node.MaxConnectionsClient)
+	poolClient, err := client.NewConnectionPool(configuration.Node.MaxConnectionsClient, configuration.DHT.ChunkEventSize)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error creating gRPC pool connection pool")
 	}
@@ -52,7 +52,7 @@ func main() {
 		}
 	}
 	// create a new node with the identity and address
-	n, err := node.NewNode(identity, listener.Addr().String(), configuration.Node.Supernode, poolClient, poolClient, configuration.DHT.TimeKeepAlive)
+	n, err := node.NewNode(identity, listener.Addr().String(), configuration.Node.Supernode, poolClient, poolClient, configuration.DHT.TimeKeepAlive, poolClient, configuration.DHT.RetryInterval, configuration.DHT.TBig, configuration.DHT.TWait)
 	if err != nil {
 		logger.Log.WithError(err).Fatal("Error creating new node")
 	}

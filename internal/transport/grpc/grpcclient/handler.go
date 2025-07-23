@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	pb "GuptaDHT/api/gen/node"
+	"GuptaDHT/internal/dht/event"
 	"GuptaDHT/internal/dht/id"
 	"GuptaDHT/internal/dht/routingtable"
 	"GuptaDHT/internal/logger"
@@ -10,6 +11,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"time"
 )
@@ -44,6 +47,170 @@ func (p *ConnectionPool) getConnectionWithTimeout(target string) (*ConnectionInf
 		return nil, err
 	}
 	return conn, nil
+}
+
+func toProtoEventChunk(events []*event.Event) *pb.EventChunk {
+	chunk := &pb.EventChunk{
+		Events: make([]*pb.Event, 0, len(events)),
+	}
+
+	for _, ev := range events {
+		pbEv := &pb.Event{
+			EventType: pb.EventType(ev.GetEventType()),
+			Target: &pb.NodeInfo{
+				Node: &pb.Node{
+					NodeId:  ev.GetTargetID().ToHexString(),
+					Address: ev.GetTargetAddress(),
+				},
+			},
+		}
+		chunk.Events = append(chunk.Events, pbEv)
+	}
+	return chunk
+}
+
+func (p *ConnectionPool) SendToSliceLeader(events []*event.Event, sender id.ID, receiver string) error {
+	// Get connection
+	conn, err := p.getConnectionWithTimeout(receiver)
+	if err != nil {
+		return err
+	}
+	defer p.ReleaseConnection(receiver)
+	// create metadata
+	md := metadata.New(map[string]string{
+		"node-id": sender.ToHexString(), // o qualunque sia il tipo
+	})
+	ctx := metadata.NewOutgoingContext(context.Background(), md)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Create stream
+	client := pb.NewDisseminationServiceClient(conn.client)
+	stream, err := client.SLNotify(ctx)
+	if err != nil {
+		return err
+	}
+	// send events in chunks
+	chunkSize := p.chunkEventSize
+	for i := 0; i < len(events); i += chunkSize {
+		end := i + chunkSize
+		if end > len(events) {
+			end = len(events)
+		}
+		chunk := toProtoEventChunk(events[i:end])
+		if err := stream.Send(chunk); err != nil {
+			return err
+		}
+	}
+	// close the stream
+	_, err = stream.CloseAndRecv()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *ConnectionPool) SendToUnitLeader(events []*event.Event, sender id.ID, receiver string) error {
+	// Get connection
+	conn, err := p.getConnectionWithTimeout(receiver)
+	if err != nil {
+		return err
+	}
+	defer p.ReleaseConnection(receiver)
+	// create metadata
+	md := metadata.New(map[string]string{
+		"node-id": sender.ToHexString(), // o qualunque sia il tipo
+	})
+	ctx := metadata.NewOutgoingContext(context.Background(), md)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Create stream
+	client := pb.NewDisseminationServiceClient(conn.client)
+	stream, err := client.FlowNotify(ctx)
+	if err != nil {
+		return err
+	}
+	// send events in chunks
+	chunkSize := p.chunkEventSize
+	for i := 0; i < len(events); i += chunkSize {
+		end := i + chunkSize
+		if end > len(events) {
+			end = len(events)
+		}
+		chunk := toProtoEventChunk(events[i:end])
+		if err := stream.Send(chunk); err != nil {
+			return err
+		}
+	}
+	// close the stream
+	_, err = stream.CloseAndRecv()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *ConnectionPool) SendToNormalNode(events []*event.Event, sender id.ID, receiver string) error {
+	// Get connection
+	conn, err := p.getConnectionWithTimeout(receiver)
+	if err != nil {
+		return err
+	}
+	defer p.ReleaseConnection(receiver)
+	// create metadata
+	md := metadata.New(map[string]string{
+		"node-id": sender.ToHexString(), // o qualunque sia il tipo
+	})
+	ctx := metadata.NewOutgoingContext(context.Background(), md)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Create stream
+	client := pb.NewDisseminationServiceClient(conn.client)
+	stream, err := client.FlowNotify(ctx)
+	if err != nil {
+		return err
+	}
+	// send events in chunks
+	chunkSize := p.chunkEventSize
+	for i := 0; i < len(events); i += chunkSize {
+		end := i + chunkSize
+		if end > len(events) {
+			end = len(events)
+		}
+		chunk := toProtoEventChunk(events[i:end])
+		if err := stream.Send(chunk); err != nil {
+			return err
+		}
+	}
+	// close the stream
+	_, err = stream.CloseAndRecv()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// extractRedirectInfoFromError estrae un RedirectInfo da un errore gRPC, se presente.
+func extractRedirectInfoFromError(err error) (*pb.RedirectInfo, bool) {
+	if err == nil {
+		return nil, false
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		return nil, false
+	}
+	for _, detail := range st.Details() {
+		anyMsg, ok := detail.(*anypb.Any)
+		if !ok {
+			continue
+		}
+		var redirect pb.RedirectInfo
+		if err := anypb.UnmarshalTo(anyMsg, &redirect, proto.UnmarshalOptions{}); err != nil {
+			continue
+		}
+		return &redirect, true
+	}
+	return nil, false
 }
 
 func (p *ConnectionPool) SendKeepAlive(receiver string) error {
@@ -104,25 +271,23 @@ func (p *ConnectionPool) BecomeSuccessor(identity id.ID, address string, sn bool
 	}
 	resp, err := joinClient.BecomeSuccessor(ctx, in)
 	if err != nil {
-		logger.Log.Infof("error when call BecomeSuccessor: %v", err)
-		st, ok := status.FromError(err)
-		if ok && st.Code() == codes.FailedPrecondition {
-			for _, detail := range st.Details() {
-				switch info := detail.(type) {
-				case *pb.RedirectInfo:
-					logger.Log.Infof("Redirected to real predecessor: %v", info.Target)
-					// create a public entry for the redirect target
-					redirectId, err := id.FromHexString(info.Target.Node.NodeId)
-					if err != nil {
-						logger.Log.Errorf("could not parse redirect node ID: %v", err)
-						return nil, fmt.Errorf("invalid redirect node ID: %w", err)
-					}
-					redirectEntry := routingtable.NewPublicEntry(redirectId, info.Target.Node.Address, info.Target.Supernode, false, false)
-					return &redirectEntry, ErrRedirected
-				default:
-					logger.Log.Warnf("Unknown error detail: %v", detail)
-				}
+		redirect, ok := extractRedirectInfoFromError(err)
+		if ok {
+			logger.Log.Infof("Redirected to real predecessor: %v", redirect.Target)
+
+			redirectId, err := id.FromHexString(redirect.Target.Node.NodeId)
+			if err != nil {
+				logger.Log.Errorf("invalid redirect node ID: %v", err)
+				return nil, fmt.Errorf("invalid redirect node ID: %w", err)
 			}
+
+			entry := routingtable.NewPublicEntry(
+				redirectId,
+				redirect.Target.Node.Address,
+				redirect.Target.Supernode,
+				false, false,
+			)
+			return &entry, ErrRedirected
 		}
 		logger.Log.Errorf("could not call BecomeSuccessor: %v", err)
 		return nil, err

@@ -2,6 +2,7 @@ package grpcserver
 
 import (
 	pb "GuptaDHT/api/gen/node"
+	"GuptaDHT/internal/dht/event"
 	"GuptaDHT/internal/dht/id"
 	"GuptaDHT/internal/dht/routingtable"
 	"GuptaDHT/internal/logger"
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"io"
 )
 
 // Server implements all gRPC services for a DHT node
@@ -73,7 +75,7 @@ func (s *Server) BecomeSuccessor(ctx context.Context, in *pb.BecomeSuccessorRequ
 	}
 	// check if the new successor node ID is less than the sender ID
 	currentSucc, err := s.node.T.GetMySuccessor()
-	if err != nil || currentSucc.ID.Equals(s.node.T.GetSelf().ID) || !senderId.IsOwnedBy(s.node.T.GetSelf().ID, currentSucc.ID) {
+	if err != nil || (!currentSucc.ID.Equals(s.node.T.GetSelf().ID) && !senderId.IsOwnedBy(s.node.T.GetSelf().ID, currentSucc.ID)) {
 		logger.Log.Errorf("New successor ID %s is not greater than current successor ID %s", senderId.ToHexString(), currentSucc.ID.ToHexString())
 		// return the redirect info
 		redirect := &pb.RedirectInfo{
@@ -118,7 +120,9 @@ func (s *Server) BecomeSuccessor(ctx context.Context, in *pb.BecomeSuccessorRequ
 	}
 	// Log the info returned
 	logger.Log.Infof("The successor of my new successor is my old successor: %s", currentSucc.ID.ToHexString())
-	//TODO: send event to slice leader
+	//send the event to slice leader
+	e := event.NewEvent(newSuccessor.ID, newSuccessor.Address, newSuccessor.IsSN, event.JOIN)
+	s.node.EventBoard.SendEvent(e)
 	// TODO: apply the change to keepalive
 	// return the successor of the new successor
 	return &pb.NodeInfo{
@@ -128,4 +132,123 @@ func (s *Server) BecomeSuccessor(ctx context.Context, in *pb.BecomeSuccessorRequ
 		},
 		Supernode: currentSucc.IsSN,
 	}, nil
+}
+
+// SLNotify is a gRPC method that allows a node to send notifications to the slice leader, and the slice leader insert the events in the event board
+func (s *Server) SLNotify(stream pb.DisseminationService_SLNotifyServer) error {
+	// check if the node is a slice leader
+	if !s.node.T.IsSliceLeader() {
+		logger.Log.Errorf("Node is not a slice leader, cannot process SLNotify")
+		return status.Errorf(codes.FailedPrecondition, "node is not a slice leader")
+	}
+	events := make([]*event.Event, 0)
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			// stream has been closed by the client
+			if err := s.node.EventBoard.AddEvent(events); err != nil {
+				logger.Log.Errorf("failed to add events to board: %v", err)
+				return status.Errorf(codes.InvalidArgument, "failed to add events to board: %v", err)
+			}
+			return stream.SendAndClose(&emptypb.Empty{})
+		}
+		if err != nil {
+			logger.Log.Errorf("Error recived in chunk: %v", err)
+			return err
+		}
+		// process the received chunk
+		for _, pbEvent := range chunk.Events {
+			idTarget, err := id.FromHexString(pbEvent.Target.Node.NodeId)
+			if err != nil {
+				logger.Log.Errorf("Invalid node ID in event: %v", err)
+				return status.Errorf(codes.InvalidArgument, "invalid node ID in event: %v", err)
+			}
+			ev := event.NewEvent(idTarget, pbEvent.Target.Node.Address, pbEvent.Target.Supernode, event.EventType(pbEvent.EventType))
+			// insert the event in the slice events
+			events = append(events, ev)
+			logger.Log.Infof("Ricevuto evento: %v", ev)
+		}
+	}
+}
+
+// FlowNotify is a gRPC method that allows nodes to notify each other about events
+func (s *Server) FlowNotify(stream pb.DisseminationService_FlowNotifyServer) error {
+	ctx := stream.Context()
+	// extract metadata from the context
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.InvalidArgument, "missing metadata")
+	}
+	senderIDs := md.Get("node-id")
+	if len(senderIDs) == 0 {
+		return status.Error(codes.InvalidArgument, "missing node-id in metadata")
+	}
+	senderID, err := id.FromHexString(senderIDs[0])
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid node-id: %v", err)
+	}
+	var receivedEvents []*event.Event
+	// Ricezione stream di chunk
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			logger.Log.Errorf("Error receiving chunk: %v", err)
+			return err
+		}
+		for _, pbEv := range chunk.Events {
+			targetID, err := id.FromHexString(pbEv.Target.Node.NodeId)
+			if err != nil {
+				logger.Log.Warnf("Skipping invalid event node-id: %v", err)
+				continue
+			}
+			ev := event.NewEvent(
+				targetID,
+				pbEv.Target.Node.Address,
+				pbEv.Target.Supernode,
+				event.EventType(pbEv.EventType),
+			)
+			receivedEvents = append(receivedEvents, ev)
+		}
+	}
+	// Aggiorna la routing table con gli eventi
+	_ = s.node.EventBoard.UpdateTable(receivedEvents)
+	// UNIT LEADER: invia agli altri due vicini se nella stessa unità
+	if s.node.T.IsUnitLeader() {
+		logger.Log.Infof("FlowNotify: node is unit leader, forwarding to both directions")
+		if next, err := s.node.T.GetMySuccessor(); err == nil {
+			if s.node.T.GetSelf().ID.SameUnit(next.ID) && !s.node.T.GetSelf().ID.Equals(next.ID) {
+				go s.node.EventBoard.SendFlowEvents(receivedEvents, next.Address)
+			}
+		}
+		if prev, err := s.node.T.GetMyPredecessor(); err == nil {
+			if s.node.T.GetSelf().ID.SameUnit(prev.ID) && !s.node.T.GetSelf().ID.Equals(prev.ID) {
+				go s.node.EventBoard.SendFlowEvents(receivedEvents, prev.Address)
+			}
+		}
+	} else {
+		// NODO NORMALE: determina direzione in base a chi ha inviato
+		next, err := s.node.T.GetMySuccessor()
+		if err == nil && !next.ID.Equals(s.node.T.GetSelf().ID) {
+			if next.ID.Equals(senderID) {
+				logger.Log.Infof("FlowNotify: the node sender is the successor, forwarding to prev direction")
+				prev, err := s.node.T.GetMyPredecessor()
+				if err == nil && s.node.T.GetSelf().ID.SameUnit(prev.ID) {
+					go s.node.EventBoard.SendFlowEvents(receivedEvents, prev.Address)
+				}
+			} else {
+				logger.Log.Infof("FlowNotify: the node sender is not the successor, forwarding to next direction")
+				if s.node.T.GetSelf().ID.SameUnit(next.ID) {
+					go s.node.EventBoard.SendFlowEvents(receivedEvents, next.Address)
+				}
+			}
+		}
+	}
+	// Risposta al client
+	if err := stream.SendAndClose(&emptypb.Empty{}); err != nil {
+		return err
+	}
+	return nil
 }
